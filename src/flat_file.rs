@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     io::{BufReader, Error, ErrorKind, Read, Result},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::DataFrame;
@@ -16,6 +16,7 @@ pub enum FlatFileFormat {
 }
 
 pub(crate) struct FlatFileReplay {
+    path: Option<PathBuf>,
     reader: Option<BufReader<File>>,
     format: FlatFileFormat,
     finished: bool,
@@ -31,6 +32,7 @@ pub(crate) enum FlatFileRead {
 impl FlatFileReplay {
     pub(crate) fn open(path: &Path, format: FlatFileFormat) -> Result<Self> {
         Ok(Self {
+            path: Some(path.to_path_buf()),
             reader: Some(BufReader::new(File::open(path)?)),
             format,
             finished: false,
@@ -40,6 +42,7 @@ impl FlatFileReplay {
 
     pub(crate) fn closed(format: FlatFileFormat) -> Self {
         Self {
+            path: None,
             reader: None,
             format,
             finished: true,
@@ -48,31 +51,68 @@ impl FlatFileReplay {
     }
 
     pub(crate) fn mark_finished(&mut self) {
+        self.path = None;
+        self.reader = None;
         self.finished = true;
     }
 
     pub(crate) fn read_next(&mut self) -> Result<FlatFileRead> {
-        if self.finished {
-            return Ok(FlatFileRead::Closed);
-        }
+        self.reopen_if_needed()?;
 
-        let Some(reader) = &mut self.reader else {
-            self.finished = true;
-            return Ok(FlatFileRead::Closed);
-        };
+        let mut looped = false;
 
-        let result = match self.format {
-            FlatFileFormat::F32 { variable_count } => read_flat_file_f32(reader, variable_count),
-            FlatFileFormat::SentinelF64 { variable_count } => {
-                read_flat_file_sentinel_f64(reader, variable_count, &mut self.f64_cache)
+        loop {
+            let Some(reader) = &mut self.reader else {
+                self.finished = true;
+                return Ok(FlatFileRead::Closed);
+            };
+
+            let result = match self.format {
+                FlatFileFormat::F32 { variable_count } => {
+                    read_flat_file_f32(reader, variable_count)
+                }
+                FlatFileFormat::SentinelF64 { variable_count } => {
+                    read_flat_file_sentinel_f64(reader, variable_count, &mut self.f64_cache)
+                }
+            };
+
+            match result {
+                Ok(FlatFileRead::Frame(frame)) => return Ok(FlatFileRead::Frame(frame)),
+                Ok(FlatFileRead::Closed) if self.path.is_some() && !looped => {
+                    looped = true;
+                    self.reopen()?;
+                }
+                Ok(FlatFileRead::Closed) => {
+                    self.finished = true;
+                    return Ok(FlatFileRead::Closed);
+                }
+                Err(err) => {
+                    self.path = None;
+                    self.reader = None;
+                    self.finished = true;
+                    return Err(err);
+                }
             }
-        };
+        }
+    }
 
-        if matches!(result, Ok(FlatFileRead::Closed)) {
-            self.finished = true;
+    fn reopen_if_needed(&mut self) -> Result<()> {
+        if self.finished && self.path.is_some() {
+            self.reopen()?;
         }
 
-        result
+        Ok(())
+    }
+
+    fn reopen(&mut self) -> Result<()> {
+        let Some(path) = &self.path else {
+            self.finished = true;
+            return Ok(());
+        };
+
+        self.reader = Some(BufReader::new(File::open(path)?));
+        self.finished = false;
+        Ok(())
     }
 }
 
@@ -204,7 +244,10 @@ fn f64_cache_for_format(format: FlatFileFormat) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::{
+        io::Cursor,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn flat_file_f32_reads_one_frame() {
@@ -270,5 +313,50 @@ mod tests {
         let result = read_flat_file_f32(&mut Cursor::new(bytes), 3).unwrap();
 
         assert!(matches!(result, FlatFileRead::Closed));
+    }
+
+    #[test]
+    fn flat_file_replay_loops_after_eof() {
+        let path = temp_file_path("loop_after_eof");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0.25f32.to_ne_bytes());
+        bytes.extend_from_slice(bytemuck::cast_slice(&[2.0f32, 5.0]));
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut replay =
+            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 2 }).unwrap();
+
+        let FlatFileRead::Frame(first) = replay.read_next().unwrap() else {
+            panic!("expected first frame");
+        };
+        let FlatFileRead::Frame(looped) = replay.read_next().unwrap() else {
+            panic!("expected looped frame");
+        };
+
+        assert_eq!(first.stamp_us, looped.stamp_us);
+        assert_eq!(first.content, looped.content);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn empty_flat_file_replay_does_not_spin() {
+        let path = temp_file_path("empty_replay");
+        std::fs::write(&path, []).unwrap();
+
+        let mut replay =
+            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 2 }).unwrap();
+
+        assert!(matches!(replay.read_next().unwrap(), FlatFileRead::Closed));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn temp_file_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("nypa_db_connector_{name}_{unique}.bin"))
     }
 }

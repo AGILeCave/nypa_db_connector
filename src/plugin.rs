@@ -278,24 +278,26 @@ fn drain_socket_frames(frames: &mut NYPADBLink, commands: &mut Commands) {
             return true;
         };
 
-        let Some(event) = handle.update() else {
-            return true;
-        };
-
-        match event.kind {
+        let mut keep_stream = true;
+        let changed = handle.drain(|event| match &event.kind {
             ReaderEventKind::Frame => {
                 stream.frame.copy_from(&event.payload);
                 commands.trigger(NypaDbFramesChanged {
                     stream_id: stream.stream_id,
                     timestamp_us: event.payload.stamp_us,
                 });
-                true
             }
             ReaderEventKind::Disconnected { reason } => {
                 eprintln!("NYPA DB stream {} disconnected: {reason}", stream.stream_id);
-                false
+                keep_stream = false;
             }
+        });
+
+        if !changed {
+            return true;
         }
+
+        keep_stream
     });
 }
 

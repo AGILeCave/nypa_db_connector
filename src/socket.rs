@@ -35,8 +35,13 @@ pub(crate) struct ReaderEvent {
 }
 
 impl ReaderHandle {
-    pub(crate) fn update(&mut self) -> Option<ReaderEvent> {
-        self.rx.update().then(|| self.rx.output_buffer().clone())
+    pub(crate) fn drain(&mut self, f: impl FnOnce(&ReaderEvent)) -> bool {
+        if !self.rx.update() {
+            return false;
+        }
+
+        f(self.rx.output_buffer());
+        true
     }
 }
 
