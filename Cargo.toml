@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy_app = "0.19"
-bevy_ecs = "0.19"
+bevy_app = "0.18"
+bevy_ecs = "0.18"
 triple_buffer = "9"
 bytemuck = "1"
 dirs = "6"
