@@ -3653,8 +3653,6 @@ name = "nypa_db_connector"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "bevy_app",
- "bevy_ecs",
  "bytemuck",
  "dirs",
  "rand",

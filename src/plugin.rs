@@ -8,8 +8,7 @@ use std::{
     time::Instant,
 };
 
-use bevy_app::{App, Plugin, Update};
-use bevy_ecs::prelude::*;
+use bevy::prelude::*;
 
 use crate::{
     DataFrame, FlatFileFormat,
