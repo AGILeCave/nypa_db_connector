@@ -42,3 +42,27 @@ fn draw_variables(variables: Res<NypaDbVariables>) {
     }
 }
 ```
+
+Fault visuals and variable activation are available through `NypaDbFaultPlugin`. Add `FaultArea`
+to world entities that can be faulted, add one `FaultSpawnSource` where thrown fault graphics should
+start, then trigger a throw at a target fault area.
+
+```rust
+use bevy::prelude::*;
+use nypa_db_connector::{
+    FaultArea, FaultSpawnSource, NypaDbControlPlugin, NypaDbFaultPlugin, NypaDbFaultTrigger,
+};
+
+app.add_plugins((NypaDbControlPlugin::default(), NypaDbFaultPlugin));
+
+commands.spawn((FaultSpawnSource, Transform::from_xyz(0.0, 1.5, 0.0)));
+
+let fault = commands
+    .spawn((
+        FaultArea::variable(0, "example_fault"),
+        Transform::from_xyz(2.0, 0.0, 0.0),
+    ))
+    .id();
+
+commands.trigger(NypaDbFaultTrigger { target: fault });
+```

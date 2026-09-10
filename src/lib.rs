@@ -10,6 +10,7 @@
 
 mod control;
 mod discovery;
+mod faults;
 mod flat_file;
 mod frame;
 mod plugin;
@@ -22,6 +23,9 @@ pub use control::{
     NypaDbVariablesChanged,
 };
 pub use discovery::find_publisher_sockets;
+pub use faults::{
+    FaultArea, FaultSpawnSource, FaultVariable, Faulted, NypaDbFaultPlugin, NypaDbFaultTrigger,
+};
 pub use flat_file::FlatFileFormat;
 pub use frame::DataFrame;
 pub use plugin::{
