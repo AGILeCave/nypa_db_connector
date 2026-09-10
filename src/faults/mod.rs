@@ -11,7 +11,7 @@ use crate::{NypaDbControl, NypaDbSetVariableOptions, NypaDbVariables};
 
 const FAULT_SPAWNER_SECONDS: f32 = 1.0;
 const FAULT_SPAWNER_ARC_HEIGHT: f32 = 0.15;
-const FAULT_SPAWNER_SCALE: f32 = 0.6;
+const FAULT_SPAWNER_SCALE: f32 = 1.2;
 const FAULT_SPAWNER_REVOLUTIONS_PER_SECOND: f32 = 1.0;
 const FAULT_SENDER_LIGHT_INTENSITY: f32 = 180_000.0;
 const FAULT_POLL_SECONDS: f32 = 1.0;
