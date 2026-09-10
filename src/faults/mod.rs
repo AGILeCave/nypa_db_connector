@@ -10,12 +10,10 @@ use bevy::{
 use crate::{NypaDbControl, NypaDbVariables};
 
 const FAULT_SPAWNER_SECONDS: f32 = 1.0;
-const FAULT_SPAWNER_ARC_HEIGHT: f32 = 0.35;
-const FAULT_SPAWNER_SCALE: f32 = 0.35;
+const FAULT_SPAWNER_ARC_HEIGHT: f32 = 0.15;
+const FAULT_SPAWNER_SCALE: f32 = 0.6;
 const FAULT_SPAWNER_REVOLUTIONS_PER_SECOND: f32 = 4.0;
 const FAULT_SENDER_LIGHT_INTENSITY: f32 = 180_000.0;
-const FAULT_OPTION_MARKER_SCALE: f32 = 0.10;
-const FAULT_ACTIVE_MARKER_SCALE: f32 = 0.05;
 const FAULT_POLL_SECONDS: f32 = 1.0;
 
 const SPARK_COUNT: usize = 30;
@@ -195,7 +193,7 @@ fn attach_fault_markers(
     for (entity, is_faulted) in &candidates {
         let option_marker = commands
             .spawn((
-                Transform::from_scale(Vec3::splat(FAULT_OPTION_MARKER_SCALE)),
+                Transform::default(),
                 if is_faulted {
                     Visibility::Hidden
                 } else {
@@ -209,7 +207,7 @@ fn attach_fault_markers(
 
         let active_marker = commands
             .spawn((
-                Transform::from_scale(Vec3::splat(FAULT_ACTIVE_MARKER_SCALE)),
+                Transform::default(),
                 if is_faulted {
                     Visibility::Visible
                 } else {
