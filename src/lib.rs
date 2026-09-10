@@ -8,12 +8,19 @@
 //! a stream buffer is updated. For testing and debugging, the plugin can also replay a flat file one
 //! timestep per Bevy update.
 
+mod control;
 mod discovery;
 mod flat_file;
 mod frame;
 mod plugin;
 mod socket;
 
+pub use control::{
+    NypaDbControl, NypaDbControlError, NypaDbControlOperation, NypaDbControlPlugin,
+    NypaDbControlQueueError, NypaDbVariable, NypaDbVariableReset, NypaDbVariableSemantic,
+    NypaDbVariableSet, NypaDbVariableStrategy, NypaDbVariableStream, NypaDbVariables,
+    NypaDbVariablesChanged,
+};
 pub use discovery::find_publisher_sockets;
 pub use flat_file::FlatFileFormat;
 pub use frame::DataFrame;
