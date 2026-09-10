@@ -202,10 +202,7 @@ fn attach_fault_markers(
                     Visibility::Visible
                 },
                 ChildOf(entity),
-                SceneRoot(load_embedded_asset!(
-                    server.as_ref(),
-                    "assets/FaultOption.glb"
-                )),
+                SceneRoot(load_embedded_gltf_scene(&server, "FaultOption.glb")),
                 FaultOptionMarker,
             ))
             .id();
@@ -219,10 +216,7 @@ fn attach_fault_markers(
                     Visibility::Hidden
                 },
                 ChildOf(entity),
-                SceneRoot(load_embedded_asset!(
-                    server.as_ref(),
-                    "assets/FaultActive.glb"
-                )),
+                SceneRoot(load_embedded_gltf_scene(&server, "FaultActive.glb")),
             ))
             .id();
 
@@ -482,7 +476,7 @@ fn spawn_fault_sender(
                 elapsed: 0.0,
                 duration: FAULT_SPAWNER_SECONDS,
             },
-            SceneRoot(load_embedded_asset!(server, "assets/SpawnerGraphic.glb")),
+            SceneRoot(load_embedded_gltf_scene(server, "SpawnerGraphic.glb")),
         ))
         .id();
 
@@ -628,6 +622,11 @@ fn set_fault_marker_visibility(
             Visibility::Hidden
         };
     }
+}
+
+fn load_embedded_gltf_scene(server: &AssetServer, file_name: &str) -> Handle<Scene> {
+    let path = format!("embedded://nypa_db_connector/faults/assets/{file_name}");
+    server.load(GltfAssetLabel::Scene(0).from_asset(path))
 }
 
 #[cfg(test)]
