@@ -73,10 +73,21 @@ impl NypaDbControl {
         name: impl Into<String>,
         value: f32,
     ) -> Result<(), NypaDbControlQueueError> {
+        self.set_variable_with_options(stream_id, name, value, NypaDbSetVariableOptions::default())
+    }
+
+    pub fn set_variable_with_options(
+        &self,
+        stream_id: usize,
+        name: impl Into<String>,
+        value: f32,
+        options: NypaDbSetVariableOptions,
+    ) -> Result<(), NypaDbControlQueueError> {
         self.send(NypaDbControlOperation::SetVariable {
             stream_id,
             name: name.into(),
             value,
+            options,
         })
     }
 
@@ -132,6 +143,28 @@ impl fmt::Display for NypaDbControlQueueError {
 
 impl std::error::Error for NypaDbControlQueueError {}
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NypaDbSetVariableOptions {
+    pub start_region: Option<NypaDbStartRegion>,
+}
+
+impl NypaDbSetVariableOptions {
+    pub fn start_region(name: impl Into<String>) -> Self {
+        Self {
+            start_region: Some(NypaDbStartRegion {
+                id: None,
+                name: Some(name.into()),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NypaDbStartRegion {
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum NypaDbControlOperation {
     GetVariables {
@@ -141,6 +174,7 @@ pub enum NypaDbControlOperation {
         stream_id: usize,
         name: String,
         value: f32,
+        options: NypaDbSetVariableOptions,
     },
     ResetVariables {
         stream_id: usize,
@@ -435,17 +469,38 @@ fn operation_rpc(operation: &NypaDbControlOperation) -> (&'static str, Value) {
             stream_id,
             name,
             value,
-        } => (
-            "set_variable",
-            json!({
-                "stream_id": stream_id,
-                "name": name,
-                "value": value,
-            }),
-        ),
+            options,
+        } => {
+            let mut params = serde_json::Map::from_iter([
+                ("stream_id".to_string(), json!(stream_id)),
+                ("name".to_string(), json!(name)),
+                ("value".to_string(), json!(value)),
+            ]);
+
+            if let Some(start_region) = &options.start_region {
+                params.insert("start_region".to_string(), start_region.to_json());
+            }
+
+            ("set_variable", Value::Object(params))
+        }
         NypaDbControlOperation::ResetVariables { stream_id } => {
             ("reset_variables", json!({ "stream_id": stream_id }))
         }
+    }
+}
+
+impl NypaDbStartRegion {
+    fn to_json(&self) -> Value {
+        let mut value = serde_json::Map::new();
+
+        if let Some(id) = &self.id {
+            value.insert("id".to_string(), json!(id));
+        }
+        if let Some(name) = &self.name {
+            value.insert("name".to_string(), json!(name));
+        }
+
+        Value::Object(value)
     }
 }
 
@@ -567,6 +622,28 @@ mod tests {
         assert_eq!(stream.strategy, NypaDbVariableStrategy::StateVector);
         assert_eq!(stream.variables[0].semantic, NypaDbVariableSemantic::Bool);
         assert_eq!(stream.variables[0].source, Some(1));
+    }
+
+    #[test]
+    fn set_variable_options_include_start_region_when_present() {
+        let (_, params) = operation_rpc(&NypaDbControlOperation::SetVariable {
+            stream_id: 0,
+            name: "example_gain".to_string(),
+            value: 2.5,
+            options: NypaDbSetVariableOptions::start_region("gain step"),
+        });
+
+        assert_eq!(
+            params,
+            json!({
+                "stream_id": 0,
+                "name": "example_gain",
+                "value": 2.5,
+                "start_region": {
+                    "name": "gain step",
+                },
+            })
+        );
     }
 
     fn test_stream(stream_id: usize, value: f32) -> NypaDbVariableStream {

@@ -7,12 +7,12 @@ use bevy::{
     prelude::*,
 };
 
-use crate::{NypaDbControl, NypaDbVariables};
+use crate::{NypaDbControl, NypaDbSetVariableOptions, NypaDbVariables};
 
 const FAULT_SPAWNER_SECONDS: f32 = 1.0;
 const FAULT_SPAWNER_ARC_HEIGHT: f32 = 0.15;
 const FAULT_SPAWNER_SCALE: f32 = 0.6;
-const FAULT_SPAWNER_REVOLUTIONS_PER_SECOND: f32 = 4.0;
+const FAULT_SPAWNER_REVOLUTIONS_PER_SECOND: f32 = 1.0;
 const FAULT_SENDER_LIGHT_INTENSITY: f32 = 180_000.0;
 const FAULT_POLL_SECONDS: f32 = 1.0;
 
@@ -64,20 +64,46 @@ impl Plugin for NypaDbFaultPlugin {
 #[derive(Component, Clone, Debug, Default)]
 pub struct FaultArea {
     pub variable: Option<FaultVariable>,
+    pub set_variable_options: NypaDbSetVariableOptions,
 }
 
 impl FaultArea {
     pub fn new(variable: Option<FaultVariable>) -> Self {
-        Self { variable }
+        Self {
+            variable,
+            set_variable_options: NypaDbSetVariableOptions::default(),
+        }
+    }
+
+    pub fn with_options(
+        variable: Option<FaultVariable>,
+        set_variable_options: NypaDbSetVariableOptions,
+    ) -> Self {
+        Self {
+            variable,
+            set_variable_options,
+        }
     }
 
     pub fn variable(stream_id: usize, name: impl Into<String>) -> Self {
-        Self {
-            variable: Some(FaultVariable {
+        Self::new(Some(FaultVariable {
+            stream_id,
+            name: name.into(),
+        }))
+    }
+
+    pub fn variable_with_options(
+        stream_id: usize,
+        name: impl Into<String>,
+        set_variable_options: NypaDbSetVariableOptions,
+    ) -> Self {
+        Self::with_options(
+            Some(FaultVariable {
                 stream_id,
                 name: name.into(),
             }),
-        }
+            set_variable_options,
+        )
     }
 }
 
@@ -330,7 +356,12 @@ fn animate_fault_senders(
                 && let Some(variable) = &area.variable
                 && let Some(control) = control.as_ref()
             {
-                let _ = control.set_variable(variable.stream_id, &variable.name, 1.0);
+                let _ = control.set_variable_with_options(
+                    variable.stream_id,
+                    &variable.name,
+                    1.0,
+                    area.set_variable_options.clone(),
+                );
             }
         }
     }

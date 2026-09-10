@@ -24,7 +24,9 @@ Variable command/control is a separate plugin. It uses NYPA DB's JSON-RPC CnC en
 requests on a worker thread so Bevy systems do not block on HTTP.
 
 ```rust
-use nypa_db_connector::{NypaDbControl, NypaDbControlPlugin, NypaDbVariables};
+use nypa_db_connector::{
+    NypaDbControl, NypaDbControlPlugin, NypaDbSetVariableOptions, NypaDbVariables,
+};
 
 app.add_plugins(NypaDbControlPlugin::default());
 
@@ -34,6 +36,15 @@ fn load_variables(control: Res<NypaDbControl>) {
 
 fn change_gain(control: Res<NypaDbControl>) {
     let _ = control.set_variable(0, "example_gain", 2.5);
+}
+
+fn change_gain_and_record(control: Res<NypaDbControl>) {
+    let _ = control.set_variable_with_options(
+        0,
+        "example_gain",
+        2.5,
+        NypaDbSetVariableOptions::start_region("gain step"),
+    );
 }
 
 fn draw_variables(variables: Res<NypaDbVariables>) {
@@ -51,6 +62,7 @@ start, then trigger a throw at a target fault area.
 use bevy::prelude::*;
 use nypa_db_connector::{
     FaultArea, FaultSpawnSource, NypaDbControlPlugin, NypaDbFaultPlugin, NypaDbFaultTrigger,
+    NypaDbSetVariableOptions,
 };
 
 app.add_plugins((NypaDbControlPlugin::default(), NypaDbFaultPlugin));
@@ -59,7 +71,11 @@ commands.spawn((FaultSpawnSource, Transform::from_xyz(0.0, 1.5, 0.0)));
 
 let fault = commands
     .spawn((
-        FaultArea::variable(0, "example_fault"),
+        FaultArea::variable_with_options(
+            0,
+            "example_fault",
+            NypaDbSetVariableOptions::start_region("example fault"),
+        ),
         Transform::from_xyz(2.0, 0.0, 0.0),
     ))
     .id();

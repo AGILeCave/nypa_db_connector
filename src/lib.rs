@@ -18,9 +18,9 @@ mod socket;
 
 pub use control::{
     NypaDbControl, NypaDbControlError, NypaDbControlOperation, NypaDbControlPlugin,
-    NypaDbControlQueueError, NypaDbVariable, NypaDbVariableReset, NypaDbVariableSemantic,
-    NypaDbVariableSet, NypaDbVariableStrategy, NypaDbVariableStream, NypaDbVariables,
-    NypaDbVariablesChanged,
+    NypaDbControlQueueError, NypaDbSetVariableOptions, NypaDbStartRegion, NypaDbVariable,
+    NypaDbVariableReset, NypaDbVariableSemantic, NypaDbVariableSet, NypaDbVariableStrategy,
+    NypaDbVariableStream, NypaDbVariables, NypaDbVariablesChanged,
 };
 pub use discovery::find_publisher_sockets;
 pub use faults::{
