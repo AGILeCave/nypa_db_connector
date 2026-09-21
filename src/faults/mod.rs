@@ -213,7 +213,6 @@ fn trigger_fault_throw(
 
 fn attach_fault_markers(
     mut commands: Commands,
-    server: Res<AssetServer>,
     candidates: Query<(Entity, Has<Faulted>), (With<FaultArea>, Without<FaultAreaMarkers>)>,
 ) {
     for (entity, is_faulted) in &candidates {
@@ -226,7 +225,6 @@ fn attach_fault_markers(
                     Visibility::Visible
                 },
                 ChildOf(entity),
-                SceneRoot(load_embedded_gltf_scene(&server, "FaultOption.glb")),
                 FaultOptionMarker,
             ))
             .id();
@@ -240,7 +238,6 @@ fn attach_fault_markers(
                     Visibility::Hidden
                 },
                 ChildOf(entity),
-                SceneRoot(load_embedded_gltf_scene(&server, "FaultActive.glb")),
             ))
             .id();
 
