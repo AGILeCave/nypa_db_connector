@@ -41,17 +41,39 @@ impl NypaDbClientPlugin {
         Self::flat_file_with_stream_id(path, format, 0)
     }
 
+    /// Replay one stream from a flat file, skipping timesteps between Bevy updates.
+    ///
+    /// A `skip` of zero emits every timestep, one emits every other timestep, and so on.
+    pub fn flat_file_with_skip(
+        path: impl Into<PathBuf>,
+        format: FlatFileFormat,
+        skip: usize,
+    ) -> Self {
+        Self::flat_file_with_stream_id_and_skip(path, format, 0, skip)
+    }
+
     /// Replay one stream from a flat file with a caller-selected stream id.
     pub fn flat_file_with_stream_id(
         path: impl Into<PathBuf>,
         format: FlatFileFormat,
         stream_id: usize,
     ) -> Self {
+        Self::flat_file_with_stream_id_and_skip(path, format, stream_id, 0)
+    }
+
+    /// Replay a flat file with a caller-selected stream id and timestep skip count.
+    pub fn flat_file_with_stream_id_and_skip(
+        path: impl Into<PathBuf>,
+        format: FlatFileFormat,
+        stream_id: usize,
+        skip: usize,
+    ) -> Self {
         Self {
             source: NypaDbClientSource::FlatFile {
                 path: path.into(),
                 format,
                 stream_id,
+                skip,
             },
         }
     }
@@ -64,6 +86,8 @@ pub enum NypaDbClientSource {
         path: PathBuf,
         format: FlatFileFormat,
         stream_id: usize,
+        /// Number of complete timesteps to discard between emitted timesteps.
+        skip: usize,
     },
 }
 
@@ -112,7 +136,15 @@ impl NYPADBLink {
                 path,
                 format,
                 stream_id,
-            } => start_file_link(source_config.clone(), stop, path, *format, *stream_id),
+                skip,
+            } => start_file_link(
+                source_config.clone(),
+                stop,
+                path,
+                *format,
+                *stream_id,
+                *skip,
+            ),
         }
     }
 
@@ -140,9 +172,7 @@ fn start_socket_link(source_config: NypaDbClientSource, stop: Arc<AtomicBool>) -
     let streams = sockets
         .into_iter()
         .filter_map(|path| {
-            let Some(stream_id) = stream_id_from_socket_path(&path) else {
-                return None;
-            };
+            let stream_id = stream_id_from_socket_path(&path)?;
 
             let handle = match spawn_reader(stop.clone(), path) {
                 Ok(reader) => reader,
@@ -175,8 +205,9 @@ fn start_file_link(
     path: &Path,
     format: FlatFileFormat,
     stream_id: usize,
+    skip: usize,
 ) -> NYPADBLink {
-    let (source, streams) = match FlatFileReplay::open(path, format) {
+    let (source, streams) = match FlatFileReplay::open(path, format, skip) {
         Ok(replay) => (
             NypaDbSourceState::FlatFile(replay),
             vec![PerStreamContent {
@@ -188,7 +219,7 @@ fn start_file_link(
         Err(err) => {
             eprintln!("NYPA DB flat-file replay open failed: {err}");
             (
-                NypaDbSourceState::FlatFile(FlatFileReplay::closed(format)),
+                NypaDbSourceState::FlatFile(FlatFileReplay::closed(format, skip)),
                 vec![],
             )
         }

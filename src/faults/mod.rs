@@ -11,9 +11,7 @@ use crate::{NypaDbControl, NypaDbSetVariableOptions, NypaDbVariables};
 
 const FAULT_SPAWNER_SECONDS: f32 = 1.0;
 const FAULT_SPAWNER_ARC_HEIGHT: f32 = 0.15;
-const FAULT_SPAWNER_SCALE: f32 = 1.2;
 const FAULT_SPAWNER_REVOLUTIONS_PER_SECOND: f32 = 1.0;
-const FAULT_SENDER_LIGHT_INTENSITY: f32 = 180_000.0;
 const FAULT_POLL_SECONDS: f32 = 1.0;
 
 const SPARK_COUNT: usize = 30;
@@ -35,7 +33,6 @@ impl Plugin for NypaDbFaultPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "assets/FaultOption.glb");
         embedded_asset!(app, "assets/FaultActive.glb");
-        embedded_asset!(app, "assets/SpawnerGraphic.glb");
         embedded_asset!(app, "assets/flare.png");
 
         app.insert_resource(FaultVariablePollTimer(Timer::from_seconds(
@@ -51,7 +48,6 @@ impl Plugin for NypaDbFaultPlugin {
                 poll_fault_variables,
                 update_fault_marker_visibility,
                 animate_fault_senders,
-                disable_fault_sender_shadows,
                 spawn_fault_impacts,
                 update_fault_impacts,
                 rotate_option_markers,
@@ -124,6 +120,15 @@ pub struct NypaDbFaultTrigger {
     pub target: Entity,
 }
 
+/// Marks the moving root entity for a fault throw.
+///
+/// Observe `Add<FaultThrow>` to attach application-owned models, lights, particles, or audio as
+/// children. The connector controls this entity's transform and despawns it on impact.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FaultThrow {
+    pub target: Entity,
+}
+
 #[derive(Component)]
 struct FaultAreaMarkers {
     option_marker: Entity,
@@ -134,17 +139,12 @@ struct FaultAreaMarkers {
 struct FaultOptionMarker;
 
 #[derive(Component)]
-struct FaultSpawnerGraphic {
+struct FaultThrowAnimation {
     fault: Entity,
     start: Vec3,
     end: Vec3,
     elapsed: f32,
     duration: f32,
-}
-
-#[derive(Component)]
-struct FaultSenderLight {
-    base_intensity: f32,
 }
 
 #[derive(Resource)]
@@ -172,18 +172,14 @@ struct FaultImpactFlare {
     material: Handle<StandardMaterial>,
 }
 
-type ShadowedFaultSenderPart = (
-    Or<(With<Mesh3d>, With<SceneRoot>)>,
-    Without<NotShadowCaster>,
-);
 type SparkQueryFilter = (Without<FaultImpactLight>, Without<FaultImpactFlare>);
 type ImpactLightQueryFilter = (Without<FaultImpactSpark>, Without<FaultImpactFlare>);
 type FlareQueryFilter = (Without<FaultImpactSpark>, Without<FaultImpactLight>);
+type UnmarkedFaultAreaFilter = (With<FaultArea>, Without<FaultAreaMarkers>);
 
 fn trigger_fault_throw(
     trigger: On<NypaDbFaultTrigger>,
     mut commands: Commands,
-    server: Res<AssetServer>,
     sources: Query<&GlobalTransform, With<FaultSpawnSource>>,
     faults: Query<(Has<Faulted>, &GlobalTransform), With<FaultArea>>,
 ) {
@@ -204,7 +200,6 @@ fn trigger_fault_throw(
 
     spawn_fault_sender(
         &mut commands,
-        &server,
         target,
         source_transform.translation(),
         fault_transform.translation(),
@@ -213,7 +208,7 @@ fn trigger_fault_throw(
 
 fn attach_fault_markers(
     mut commands: Commands,
-    candidates: Query<(Entity, Has<Faulted>), (With<FaultArea>, Without<FaultAreaMarkers>)>,
+    candidates: Query<(Entity, Has<Faulted>), UnmarkedFaultAreaFilter>,
 ) {
     for (entity, is_faulted) in &candidates {
         let option_marker = commands
@@ -333,8 +328,7 @@ fn animate_fault_senders(
     time: Res<Time>,
     control: Option<Res<NypaDbControl>>,
     areas: Query<&FaultArea>,
-    mut senders: Query<(Entity, &mut Transform, &mut FaultSpawnerGraphic)>,
-    mut lights: Query<(&mut PointLight, &FaultSenderLight)>,
+    mut senders: Query<(Entity, &mut Transform, &mut FaultThrowAnimation)>,
 ) {
     for (entity, mut transform, mut sender) in &mut senders {
         sender.elapsed += time.delta_secs();
@@ -360,29 +354,6 @@ fn animate_fault_senders(
                     area.set_variable_options.clone(),
                 );
             }
-        }
-    }
-
-    for (mut light, sender_light) in &mut lights {
-        light.intensity = sender_light.base_intensity * random_between(0.68, 1.24);
-    }
-}
-
-fn disable_fault_sender_shadows(
-    mut commands: Commands,
-    senders: Query<Entity, With<FaultSpawnerGraphic>>,
-    children: Query<&ChildOf>,
-    shadowed: Query<Entity, ShadowedFaultSenderPart>,
-) {
-    if senders.is_empty() {
-        return;
-    }
-
-    for entity in &shadowed {
-        if is_descendant_of_any(entity, &senders, &children) {
-            commands
-                .entity(entity)
-                .insert((Pickable::IGNORE, NotShadowCaster, NotShadowReceiver));
         }
     }
 }
@@ -481,44 +452,19 @@ fn rotate_option_markers(
     }
 }
 
-fn spawn_fault_sender(
-    commands: &mut Commands,
-    server: &AssetServer,
-    fault: Entity,
-    start: Vec3,
-    end: Vec3,
-) {
-    let sender = commands
-        .spawn((
-            Transform::from_translation(start).with_scale(Vec3::splat(FAULT_SPAWNER_SCALE)),
-            Visibility::Visible,
-            Pickable::IGNORE,
-            NotShadowCaster,
-            NotShadowReceiver,
-            FaultSpawnerGraphic {
-                fault,
-                start,
-                end,
-                elapsed: 0.0,
-                duration: FAULT_SPAWNER_SECONDS,
-            },
-            SceneRoot(load_embedded_gltf_scene(server, "SpawnerGraphic.glb")),
-        ))
-        .id();
-
+fn spawn_fault_sender(commands: &mut Commands, fault: Entity, start: Vec3, end: Vec3) {
     commands.spawn((
-        PointLight {
-            color: Color::srgb(1.0, 0.82, 0.12),
-            intensity: FAULT_SENDER_LIGHT_INTENSITY,
-            range: 2.5,
-            shadows_enabled: false,
-            ..default()
+        Transform::from_translation(start),
+        Visibility::Visible,
+        Pickable::IGNORE,
+        FaultThrow { target: fault },
+        FaultThrowAnimation {
+            fault,
+            start,
+            end,
+            elapsed: 0.0,
+            duration: FAULT_SPAWNER_SECONDS,
         },
-        FaultSenderLight {
-            base_intensity: FAULT_SENDER_LIGHT_INTENSITY,
-        },
-        Transform::default(),
-        ChildOf(sender),
     ));
 }
 
@@ -610,24 +556,6 @@ fn random_between(min: f32, max: f32) -> f32 {
     min + rand::random::<f32>() * (max - min)
 }
 
-fn is_descendant_of_any(
-    entity: Entity,
-    ancestors: &Query<Entity, With<FaultSpawnerGraphic>>,
-    children: &Query<&ChildOf>,
-) -> bool {
-    let mut current = entity;
-
-    while let Ok(parent) = children.get(current) {
-        current = parent.parent();
-
-        if ancestors.contains(current) {
-            return true;
-        }
-    }
-
-    false
-}
-
 fn set_fault_marker_visibility(
     markers: &FaultAreaMarkers,
     is_faulted: bool,
@@ -648,11 +576,6 @@ fn set_fault_marker_visibility(
             Visibility::Hidden
         };
     }
-}
-
-fn load_embedded_gltf_scene(server: &AssetServer, file_name: &str) -> Handle<Scene> {
-    let path = format!("embedded://nypa_db_connector/faults/assets/{file_name}");
-    server.load(GltfAssetLabel::Scene(0).from_asset(path))
 }
 
 #[cfg(test)]

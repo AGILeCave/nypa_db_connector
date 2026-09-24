@@ -25,3 +25,4 @@ target
 
 /target
 **/*.blend1
+**/*.DS_Store

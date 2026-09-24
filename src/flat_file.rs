@@ -19,6 +19,8 @@ pub(crate) struct FlatFileReplay {
     path: Option<PathBuf>,
     reader: Option<BufReader<File>>,
     format: FlatFileFormat,
+    skip: usize,
+    has_emitted_frame: bool,
     finished: bool,
     f64_cache: Vec<f64>,
 }
@@ -30,21 +32,25 @@ pub(crate) enum FlatFileRead {
 }
 
 impl FlatFileReplay {
-    pub(crate) fn open(path: &Path, format: FlatFileFormat) -> Result<Self> {
+    pub(crate) fn open(path: &Path, format: FlatFileFormat, skip: usize) -> Result<Self> {
         Ok(Self {
             path: Some(path.to_path_buf()),
             reader: Some(BufReader::new(File::open(path)?)),
             format,
+            skip,
+            has_emitted_frame: false,
             finished: false,
             f64_cache: f64_cache_for_format(format),
         })
     }
 
-    pub(crate) fn closed(format: FlatFileFormat) -> Self {
+    pub(crate) fn closed(format: FlatFileFormat, skip: usize) -> Self {
         Self {
             path: None,
             reader: None,
             format,
+            skip,
+            has_emitted_frame: false,
             finished: true,
             f64_cache: f64_cache_for_format(format),
         }
@@ -57,6 +63,22 @@ impl FlatFileReplay {
     }
 
     pub(crate) fn read_next(&mut self) -> Result<FlatFileRead> {
+        if self.has_emitted_frame {
+            for _ in 0..self.skip {
+                if matches!(self.read_next_frame()?, FlatFileRead::Closed) {
+                    return Ok(FlatFileRead::Closed);
+                }
+            }
+        }
+
+        let result = self.read_next_frame()?;
+        if matches!(result, FlatFileRead::Frame(_)) {
+            self.has_emitted_frame = true;
+        }
+        Ok(result)
+    }
+
+    fn read_next_frame(&mut self) -> Result<FlatFileRead> {
         self.reopen_if_needed()?;
 
         let mut looped = false;
@@ -123,7 +145,9 @@ fn read_flat_file_f32(source: &mut impl Read, variable_count: usize) -> Result<F
     }
 
     let mut content = vec![0.0; variable_count];
-    source.read_exact(bytemuck::cast_slice_mut(&mut content))?;
+    if !read_exact_or_closed(source, bytemuck::cast_slice_mut(&mut content))? {
+        return Ok(FlatFileRead::Closed);
+    }
 
     let Some(stamp_us) = timestamp_f32_to_us(f32::from_ne_bytes(time))? else {
         return Ok(FlatFileRead::Closed);
@@ -184,12 +208,9 @@ fn read_flat_file_sentinel_f64(
 }
 
 fn read_exact_or_closed(source: &mut impl Read, mut dest: &mut [u8]) -> Result<bool> {
-    let original_len = dest.len();
-
     while !dest.is_empty() {
         match source.read(dest) {
-            Ok(0) if dest.len() == original_len => return Ok(false),
-            Ok(0) => return Err(Error::new(ErrorKind::UnexpectedEof, "partial frame")),
+            Ok(0) => return Ok(false),
             Ok(n) => {
                 dest = &mut dest[n..];
             }
@@ -305,6 +326,27 @@ mod tests {
     }
 
     #[test]
+    fn flat_file_f32_returns_closed_on_partial_frame() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0.25f32.to_ne_bytes());
+        bytes.extend_from_slice(&2.0f32.to_ne_bytes());
+
+        let result = read_flat_file_f32(&mut Cursor::new(bytes), 2).unwrap();
+
+        assert!(matches!(result, FlatFileRead::Closed));
+    }
+
+    #[test]
+    fn flat_file_sentinel_f64_returns_closed_on_partial_frame() {
+        let bytes = vec![0_u8; 12];
+        let mut cache = f64_cache_for_format(FlatFileFormat::SentinelF64 { variable_count: 2 });
+
+        let result = read_flat_file_sentinel_f64(&mut Cursor::new(bytes), 2, &mut cache).unwrap();
+
+        assert!(matches!(result, FlatFileRead::Closed));
+    }
+
+    #[test]
     fn negative_flat_file_timestamp_closes_replay() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(-1.0f32).to_ne_bytes());
@@ -324,7 +366,33 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
 
         let mut replay =
-            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 2 }).unwrap();
+            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 2 }, 0).unwrap();
+
+        let FlatFileRead::Frame(first) = replay.read_next().unwrap() else {
+            panic!("expected first frame");
+        };
+        let FlatFileRead::Frame(looped) = replay.read_next().unwrap() else {
+            panic!("expected looped frame");
+        };
+
+        assert_eq!(first.stamp_us, looped.stamp_us);
+        assert_eq!(first.content, looped.content);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn flat_file_replay_loops_after_partial_trailing_frame() {
+        let path = temp_file_path("loop_after_partial_frame");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0.25f32.to_ne_bytes());
+        bytes.extend_from_slice(bytemuck::cast_slice(&[2.0f32, 5.0]));
+        bytes.extend_from_slice(&0.5f32.to_ne_bytes());
+        bytes.extend_from_slice(&7.0f32.to_ne_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut replay =
+            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 2 }, 0).unwrap();
 
         let FlatFileRead::Frame(first) = replay.read_next().unwrap() else {
             panic!("expected first frame");
@@ -345,9 +413,39 @@ mod tests {
         std::fs::write(&path, []).unwrap();
 
         let mut replay =
-            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 2 }).unwrap();
+            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 2 }, 0).unwrap();
 
         assert!(matches!(replay.read_next().unwrap(), FlatFileRead::Closed));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn flat_file_replay_skips_configured_timesteps() {
+        let path = temp_file_path("skip_timesteps");
+        let mut bytes = Vec::new();
+        for value in 0..5 {
+            bytes.extend_from_slice(&(value as f32).to_ne_bytes());
+            bytes.extend_from_slice(&(value as f32).to_ne_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut replay =
+            FlatFileReplay::open(&path, FlatFileFormat::F32 { variable_count: 1 }, 1).unwrap();
+
+        let FlatFileRead::Frame(first) = replay.read_next().unwrap() else {
+            panic!("expected first frame");
+        };
+        let FlatFileRead::Frame(second) = replay.read_next().unwrap() else {
+            panic!("expected second frame");
+        };
+        let FlatFileRead::Frame(third) = replay.read_next().unwrap() else {
+            panic!("expected third frame");
+        };
+
+        assert_eq!(first.content, [0.0]);
+        assert_eq!(second.content, [2.0]);
+        assert_eq!(third.content, [4.0]);
 
         std::fs::remove_file(path).unwrap();
     }

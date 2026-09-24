@@ -91,6 +91,25 @@ impl NypaDbControl {
         })
     }
 
+    /// Set several variables in one state-vector write.
+    ///
+    /// All updates must belong to the same state-vector source. The server validates the entire
+    /// batch before applying any of it.
+    pub fn set_variables<I, U>(
+        &self,
+        stream_id: usize,
+        updates: I,
+    ) -> Result<(), NypaDbControlQueueError>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<NypaDbVariableUpdate>,
+    {
+        self.send(NypaDbControlOperation::SetVariables {
+            stream_id,
+            updates: updates.into_iter().map(Into::into).collect(),
+        })
+    }
+
     pub fn reset_variables(&self, stream_id: usize) -> Result<(), NypaDbControlQueueError> {
         self.send(NypaDbControlOperation::ResetVariables { stream_id })
     }
@@ -165,6 +184,25 @@ pub struct NypaDbStartRegion {
     pub name: Option<String>,
 }
 
+/// One requested change in a [`NypaDbControl::set_variables`] batch.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct NypaDbVariableUpdate {
+    pub name: String,
+    pub value: f32,
+}
+
+impl<N> From<(N, f32)> for NypaDbVariableUpdate
+where
+    N: Into<String>,
+{
+    fn from((name, value): (N, f32)) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum NypaDbControlOperation {
     GetVariables {
@@ -176,6 +214,10 @@ pub enum NypaDbControlOperation {
         value: f32,
         options: NypaDbSetVariableOptions,
     },
+    SetVariables {
+        stream_id: usize,
+        updates: Vec<NypaDbVariableUpdate>,
+    },
     ResetVariables {
         stream_id: usize,
     },
@@ -186,6 +228,7 @@ impl NypaDbControlOperation {
         match self {
             Self::GetVariables { stream_id }
             | Self::SetVariable { stream_id, .. }
+            | Self::SetVariables { stream_id, .. }
             | Self::ResetVariables { stream_id } => *stream_id,
         }
     }
@@ -240,6 +283,16 @@ impl NypaDbVariables {
         };
 
         variable.value = update.value;
+    }
+
+    fn apply_batch_update(&mut self, update: &NypaDbVariablesSet) {
+        for variable_update in &update.updates {
+            self.apply_update(&NypaDbVariableSet {
+                stream_id: update.stream_id,
+                name: variable_update.name.clone(),
+                value: variable_update.value,
+            });
+        }
     }
 
     fn apply_reset(&mut self, reset: &NypaDbVariableReset) {
@@ -308,6 +361,16 @@ pub struct NypaDbVariableSet {
     pub value: f32,
 }
 
+/// Emitted after the server accepts and delivers a batch variable update.
+#[derive(Clone, Debug, Event)]
+pub struct NypaDbVariablesSet {
+    pub stream_id: usize,
+    pub strategy: NypaDbVariableStrategy,
+    pub sources: Vec<usize>,
+    /// Accepted updates with server-coerced values, in request order.
+    pub updates: Vec<NypaDbVariableUpdate>,
+}
+
 #[derive(Clone, Debug, Event)]
 pub struct NypaDbVariableReset {
     pub stream_id: usize,
@@ -332,6 +395,7 @@ enum ControlRequest {
 enum ControlResponse {
     Variables(NypaDbVariableStream),
     VariableSet(NypaDbVariableSet),
+    VariablesSet(NypaDbVariablesSet),
     VariableReset(NypaDbVariableReset),
     Error(NypaDbControlError),
 }
@@ -349,6 +413,13 @@ fn drain_nypa_control(
         }
         ControlResponse::VariableSet(update) => {
             variables.apply_update(&update);
+            commands.trigger(NypaDbVariablesChanged {
+                stream_id: update.stream_id,
+            });
+            commands.trigger(update);
+        }
+        ControlResponse::VariablesSet(update) => {
+            variables.apply_batch_update(&update);
             commands.trigger(NypaDbVariablesChanged {
                 stream_id: update.stream_id,
             });
@@ -446,6 +517,16 @@ fn send_operation(
                 value: update.value,
             }))
         }
+        NypaDbControlOperation::SetVariables { .. } => {
+            let update = serde_json::from_value::<VariableBatchUpdateResult>(result)
+                .map_err(|err| err.to_string())?;
+            Ok(ControlResponse::VariablesSet(NypaDbVariablesSet {
+                stream_id: update.stream_id,
+                strategy: update.strategy,
+                sources: update.sources,
+                updates: update.updates,
+            }))
+        }
         NypaDbControlOperation::ResetVariables { .. } => {
             let reset = serde_json::from_value::<VariableResetResult>(result)
                 .map_err(|err| err.to_string())?;
@@ -483,6 +564,13 @@ fn operation_rpc(operation: &NypaDbControlOperation) -> (&'static str, Value) {
 
             ("set_variable", Value::Object(params))
         }
+        NypaDbControlOperation::SetVariables { stream_id, updates } => (
+            "set_variables",
+            json!({
+                "stream_id": stream_id,
+                "updates": updates,
+            }),
+        ),
         NypaDbControlOperation::ResetVariables { stream_id } => {
             ("reset_variables", json!({ "stream_id": stream_id }))
         }
@@ -542,6 +630,14 @@ struct VariableUpdateResult {
 }
 
 #[derive(Deserialize)]
+struct VariableBatchUpdateResult {
+    stream_id: usize,
+    strategy: NypaDbVariableStrategy,
+    sources: Vec<usize>,
+    updates: Vec<NypaDbVariableUpdate>,
+}
+
+#[derive(Deserialize)]
 struct VariableResetResult {
     stream_id: usize,
     strategy: NypaDbVariableStrategy,
@@ -580,6 +676,35 @@ mod tests {
         });
 
         assert_eq!(variables.variable(0, "gain").unwrap().value, 2.5);
+    }
+
+    #[test]
+    fn variable_batch_update_changes_all_reflected_values() {
+        let mut variables = NypaDbVariables::default();
+        let mut stream = test_stream(0, 1.0);
+        stream.variables.push(NypaDbVariable {
+            name: "Enabled".to_string(),
+            internal_name: "enabled".to_string(),
+            description: None,
+            initial_value: 0.0,
+            value: 0.0,
+            min: Some(0.0),
+            max: Some(1.0),
+            semantic: NypaDbVariableSemantic::Bool,
+            index: Some(1),
+            source: Some(0),
+        });
+        variables.upsert_stream(stream);
+
+        variables.apply_batch_update(&NypaDbVariablesSet {
+            stream_id: 0,
+            strategy: NypaDbVariableStrategy::StateVector,
+            sources: vec![0],
+            updates: vec![("gain", 2.5).into(), ("enabled", 1.0).into()],
+        });
+
+        assert_eq!(variables.variable(0, "gain").unwrap().value, 2.5);
+        assert_eq!(variables.variable(0, "enabled").unwrap().value, 1.0);
     }
 
     #[test]
@@ -643,6 +768,55 @@ mod tests {
                     "name": "gain step",
                 },
             })
+        );
+    }
+
+    #[test]
+    fn set_variables_uses_batch_rpc_shape() {
+        let (method, params) = operation_rpc(&NypaDbControlOperation::SetVariables {
+            stream_id: 0,
+            updates: vec![
+                ("state_breaker", 1.0).into(),
+                ("state_setpoint", 0.75).into(),
+            ],
+        });
+
+        assert_eq!(method, "set_variables");
+        assert_eq!(
+            params,
+            json!({
+                "stream_id": 0,
+                "updates": [
+                    { "name": "state_breaker", "value": 1.0 },
+                    { "name": "state_setpoint", "value": 0.75 },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_variable_batch_result() {
+        let result = json!({
+            "stream_id": 0,
+            "strategy": "state_vector",
+            "sources": [1],
+            "updates": [
+                { "name": "state_breaker", "value": 1.0 },
+                { "name": "state_setpoint", "value": 0.75 }
+            ]
+        });
+
+        let update: VariableBatchUpdateResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(update.stream_id, 0);
+        assert_eq!(update.strategy, NypaDbVariableStrategy::StateVector);
+        assert_eq!(update.sources, vec![1]);
+        assert_eq!(
+            update.updates,
+            vec![
+                NypaDbVariableUpdate::from(("state_breaker", 1.0)),
+                NypaDbVariableUpdate::from(("state_setpoint", 0.75)),
+            ]
         );
     }
 

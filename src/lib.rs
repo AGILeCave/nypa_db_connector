@@ -20,11 +20,13 @@ pub use control::{
     NypaDbControl, NypaDbControlError, NypaDbControlOperation, NypaDbControlPlugin,
     NypaDbControlQueueError, NypaDbSetVariableOptions, NypaDbStartRegion, NypaDbVariable,
     NypaDbVariableReset, NypaDbVariableSemantic, NypaDbVariableSet, NypaDbVariableStrategy,
-    NypaDbVariableStream, NypaDbVariables, NypaDbVariablesChanged,
+    NypaDbVariableStream, NypaDbVariableUpdate, NypaDbVariables, NypaDbVariablesChanged,
+    NypaDbVariablesSet,
 };
 pub use discovery::find_publisher_sockets;
 pub use faults::{
-    FaultArea, FaultSpawnSource, FaultVariable, Faulted, NypaDbFaultPlugin, NypaDbFaultTrigger,
+    FaultArea, FaultSpawnSource, FaultThrow, FaultVariable, Faulted, NypaDbFaultPlugin,
+    NypaDbFaultTrigger,
 };
 pub use flat_file::FlatFileFormat;
 pub use frame::DataFrame;
