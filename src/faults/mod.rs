@@ -118,6 +118,9 @@ pub struct FaultSpawnSource;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Faulted;
 
+#[derive(Component)]
+struct FaultImpactSpawned;
+
 #[derive(Clone, Copy, Debug, Event)]
 pub struct NypaDbFaultTrigger {
     pub target: Entity,
@@ -386,11 +389,16 @@ fn animate_fault_senders(
 fn spawn_fault_impacts(
     mut commands: Commands,
     server: Res<AssetServer>,
-    faulted: Query<&GlobalTransform, (With<FaultArea>, Added<Faulted>)>,
+    faulted: Query<
+        (Entity, &GlobalTransform),
+        (With<FaultArea>, Added<Faulted>, Without<FaultImpactSpawned>),
+    >,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for transform in &faulted {
+    for (entity, transform) in &faulted {
+        commands.entity(entity).insert(FaultImpactSpawned);
+
         spawn_fault_impact(
             &mut commands,
             &server,
