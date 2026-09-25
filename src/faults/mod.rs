@@ -44,7 +44,7 @@ impl Plugin for NypaDbFaultPlugin {
             Update,
             (
                 attach_fault_markers,
-                sync_faulted_from_variables,
+                //sync_faulted_from_variables,
                 poll_fault_variables,
                 update_fault_marker_visibility,
                 animate_fault_senders,
@@ -117,9 +117,6 @@ pub struct FaultSpawnSource;
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Faulted;
-
-#[derive(Component)]
-struct FaultImpactSpawned;
 
 #[derive(Clone, Copy, Debug, Event)]
 pub struct NypaDbFaultTrigger {
@@ -312,6 +309,7 @@ fn sync_faulted_from_variables(
         let Some(variable) = &area.variable else {
             continue;
         };
+
         let Some(value) = variables
             .variable(variable.stream_id, &variable.name)
             .map(|variable| variable.value)
@@ -320,6 +318,7 @@ fn sync_faulted_from_variables(
         };
 
         let should_be_faulted = value >= 0.5;
+
         match (is_faulted, should_be_faulted) {
             (false, true) => {
                 commands.entity(entity).insert(Faulted);
@@ -389,15 +388,12 @@ fn animate_fault_senders(
 fn spawn_fault_impacts(
     mut commands: Commands,
     server: Res<AssetServer>,
-    faulted: Query<
-        (Entity, &GlobalTransform),
-        (With<FaultArea>, Added<Faulted>, Without<FaultImpactSpawned>),
-    >,
+    faulted: Query<&GlobalTransform, (With<FaultArea>, Added<Faulted>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (entity, transform) in &faulted {
-        commands.entity(entity).insert(FaultImpactSpawned);
+    for transform in &faulted {
+        //commands.entity(entity).insert(FaultImpactSpawned);
 
         spawn_fault_impact(
             &mut commands,
