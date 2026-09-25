@@ -61,6 +61,7 @@ impl Plugin for NypaDbFaultPlugin {
 pub struct FaultArea {
     pub variable: Option<FaultVariable>,
     pub set_variable_options: NypaDbSetVariableOptions,
+    pub throw_speed: Option<f32>,
 }
 
 impl FaultArea {
@@ -68,6 +69,7 @@ impl FaultArea {
         Self {
             variable,
             set_variable_options: NypaDbSetVariableOptions::default(),
+            throw_speed: None,
         }
     }
 
@@ -78,6 +80,7 @@ impl FaultArea {
         Self {
             variable,
             set_variable_options,
+            throw_speed: None,
         }
     }
 
@@ -180,11 +183,12 @@ type UnmarkedFaultAreaFilter = (With<FaultArea>, Without<FaultAreaMarkers>);
 fn trigger_fault_throw(
     trigger: On<NypaDbFaultTrigger>,
     mut commands: Commands,
+    control: Option<Res<NypaDbControl>>,
     sources: Query<&GlobalTransform, With<FaultSpawnSource>>,
-    faults: Query<(Has<Faulted>, &GlobalTransform), With<FaultArea>>,
+    faults: Query<(Entity, Has<Faulted>, &GlobalTransform, &FaultArea)>,
 ) {
     let target = trigger.event().target;
-    let Ok((is_faulted, fault_transform)) = faults.get(target) else {
+    let Ok((fault_entity, is_faulted, fault_transform, fault_area)) = faults.get(target) else {
         warn!("Cannot trigger NYPA DB fault: target entity is not a FaultArea");
         return;
     };
@@ -198,11 +202,32 @@ fn trigger_fault_throw(
         return;
     };
 
+    let duration = fault_area.throw_speed.unwrap_or(FAULT_SPAWNER_SECONDS);
+
+    if duration <= 0.0 {
+        // insta trigger
+        commands.entity(fault_entity).insert(Faulted);
+
+        if let Some(variable) = &fault_area.variable
+            && let Some(control) = control.as_ref()
+        {
+            let _ = control.set_variable_with_options(
+                variable.stream_id,
+                &variable.name,
+                1.0,
+                fault_area.set_variable_options.clone(),
+            );
+        }
+
+        return;
+    }
+
     spawn_fault_sender(
         &mut commands,
         target,
         source_transform.translation(),
         fault_transform.translation(),
+        FAULT_SPAWNER_SECONDS,
     );
 }
 
@@ -452,7 +477,13 @@ fn rotate_option_markers(
     }
 }
 
-fn spawn_fault_sender(commands: &mut Commands, fault: Entity, start: Vec3, end: Vec3) {
+fn spawn_fault_sender(
+    commands: &mut Commands,
+    fault: Entity,
+    start: Vec3,
+    end: Vec3,
+    duration: f32,
+) {
     commands.spawn((
         Transform::from_translation(start),
         Visibility::Visible,
@@ -463,7 +494,7 @@ fn spawn_fault_sender(commands: &mut Commands, fault: Entity, start: Vec3, end: 
             start,
             end,
             elapsed: 0.0,
-            duration: FAULT_SPAWNER_SECONDS,
+            duration,
         },
     ));
 }
