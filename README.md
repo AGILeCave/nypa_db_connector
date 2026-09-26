@@ -79,10 +79,14 @@ fn draw_variables(variables: Res<NypaDbVariables>) {
 
 Fault behavior and variable activation are available through `NypaDbFaultPlugin`. Add `FaultArea`
 to world entities that can be faulted, add one `FaultSpawnSource` where fault throws should start,
-then trigger a throw at a target fault area. The moving throw entity has a public `FaultThrow`
-component; observe that component being added to attach your own model, lights, particles, or audio.
-Content attached as a child follows the library-managed arc and is despawned with the throw on
-impact.
+then trigger a throw at a target fault area. A successful request adds `FaultRequested`; `Faulted`
+is added and removed only to reflect the DB's reported value. Connector-requested faults reset their
+variable to zero after one second by default. Configure this with
+`FaultArea::with_auto_reset_after`, or use `without_auto_reset` for a latched fault.
+
+The moving throw entity has a public `FaultThrow` component; observe that component being added to
+attach your own model, lights, particles, or audio. Content attached as a child follows the
+library-managed arc and is despawned with the throw on impact.
 
 ```rust
 use bevy::gltf::GltfAssetLabel;
@@ -117,7 +121,8 @@ let fault = commands
             0,
             "example_fault",
             NypaDbSetVariableOptions::start_region("example fault"),
-        ),
+        )
+        .with_auto_reset_after(std::time::Duration::from_millis(750)),
         Transform::from_xyz(2.0, 0.0, 0.0),
     ))
     .id();
