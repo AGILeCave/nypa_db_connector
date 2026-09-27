@@ -25,8 +25,8 @@ pub use control::{
 };
 pub use discovery::find_publisher_sockets;
 pub use faults::{
-    FaultArea, FaultRequested, FaultSpawnSource, FaultThrow, FaultVariable, Faulted,
-    NypaDbFaultPlugin, NypaDbFaultTrigger,
+    FaultArea, FaultClearRequested, FaultRequested, FaultSpawnSource, FaultThrow, FaultVariable,
+    Faulted, NypaDbFaultPlugin, NypaDbFaultTrigger,
 };
 pub use flat_file::FlatFileFormat;
 pub use frame::DataFrame;

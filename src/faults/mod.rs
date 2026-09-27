@@ -16,8 +16,6 @@ const FAULT_SPAWNER_SECONDS: f32 = 1.0;
 const FAULT_SPAWNER_ARC_HEIGHT: f32 = 0.15;
 const FAULT_SPAWNER_REVOLUTIONS_PER_SECOND: f32 = 1.0;
 const FAULT_POLL_SECONDS: f32 = 1.0;
-const DEFAULT_FAULT_AUTO_RESET: Duration = Duration::from_secs(1);
-
 const SPARK_COUNT: usize = 30;
 const SPARK_SIZE: f32 = 0.003;
 const SPARK_MIN_LIFETIME: f32 = 1.0;
@@ -44,6 +42,7 @@ impl Plugin for NypaDbFaultPlugin {
             TimerMode::Repeating,
         )))
         .add_observer(trigger_fault_throw)
+        .add_observer(handle_fault_clear_requested)
         .add_observer(handle_fault_variable_set)
         .add_observer(handle_fault_control_error)
         .add_systems(
@@ -71,7 +70,7 @@ pub struct FaultArea {
     pub throw_speed: Option<f32>,
     /// How long a connector-requested fault remains active before requesting a reset.
     ///
-    /// Defaults to one second. Set this to `None` for a latched fault.
+    /// Defaults to `None`, leaving the fault active until [`FaultClearRequested`] is added.
     pub auto_reset_after: Option<Duration>,
 }
 
@@ -81,7 +80,7 @@ impl FaultArea {
             variable,
             set_variable_options: NypaDbSetVariableOptions::default(),
             throw_speed: None,
-            auto_reset_after: Some(DEFAULT_FAULT_AUTO_RESET),
+            auto_reset_after: None,
         }
     }
 
@@ -93,7 +92,7 @@ impl FaultArea {
             variable,
             set_variable_options,
             throw_speed: None,
-            auto_reset_after: Some(DEFAULT_FAULT_AUTO_RESET),
+            auto_reset_after: None,
         }
     }
 
@@ -122,11 +121,6 @@ impl FaultArea {
         self.auto_reset_after = Some(timeout);
         self
     }
-
-    pub fn without_auto_reset(mut self) -> Self {
-        self.auto_reset_after = None;
-        self
-    }
 }
 
 impl Default for FaultArea {
@@ -146,14 +140,21 @@ pub struct FaultSpawnSource;
 
 /// Indicates that the DB currently reports this fault as active.
 ///
-/// This component is maintained by [`NypaDbFaultPlugin`]. Treat it as read-only state and request
-/// changes through [`NypaDbFaultTrigger`] instead of mutating it directly.
+/// This component is maintained by [`NypaDbFaultPlugin`]. Treat it as read-only state. Activate a
+/// fault through [`NypaDbFaultTrigger`] and clear it by adding [`FaultClearRequested`].
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Faulted;
 
 /// Indicates that this fault has been requested but not yet confirmed by the DB.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct FaultRequested;
+
+/// Requests that an active fault's DB variable be set back to zero.
+///
+/// The connector removes this component when the request succeeds or fails. [`Faulted`] is removed
+/// separately, only after the DB reports that the fault is no longer active.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct FaultClearRequested;
 
 #[derive(Clone, Copy, Debug, Event)]
 pub struct NypaDbFaultTrigger {
@@ -189,9 +190,6 @@ struct FaultThrowAnimation {
 
 #[derive(Component)]
 struct FaultAutoReset(Timer);
-
-#[derive(Component)]
-struct FaultResetRequested;
 
 #[derive(Resource)]
 struct FaultVariablePollTimer(Timer);
@@ -385,7 +383,7 @@ fn sync_faulted_from_variables(
             (true, false) => {
                 commands
                     .entity(entity)
-                    .remove::<(Faulted, FaultAutoReset, FaultResetRequested)>();
+                    .remove::<(Faulted, FaultAutoReset, FaultClearRequested)>();
             }
             _ => {}
         }
@@ -399,12 +397,12 @@ fn handle_fault_variable_set(
         Entity,
         &FaultArea,
         Has<FaultRequested>,
-        Has<FaultResetRequested>,
+        Has<FaultClearRequested>,
     )>,
 ) {
     let update = update.event();
 
-    for (entity, area, activation_requested, reset_requested) in &fault_areas {
+    for (entity, area, activation_requested, clear_requested) in &fault_areas {
         let Some(variable) = &area.variable else {
             continue;
         };
@@ -416,15 +414,37 @@ fn handle_fault_variable_set(
             commands.entity(entity).remove::<FaultRequested>();
         }
 
-        if reset_requested {
-            let mut entity_commands = commands.entity(entity);
-            entity_commands.remove::<FaultResetRequested>();
-            if update.value >= 0.5
-                && let Some(timeout) = area.auto_reset_after
-            {
-                entity_commands.insert(FaultAutoReset(Timer::new(timeout, TimerMode::Once)));
-            }
+        if clear_requested {
+            commands.entity(entity).remove::<FaultClearRequested>();
         }
+    }
+}
+
+fn handle_fault_clear_requested(
+    request: On<Add, FaultClearRequested>,
+    mut commands: Commands,
+    control: Option<Res<NypaDbControl>>,
+    fault_areas: Query<(&FaultArea, Has<Faulted>)>,
+) {
+    let entity = request.entity;
+    let Ok((area, is_faulted)) = fault_areas.get(entity) else {
+        commands.entity(entity).remove::<FaultClearRequested>();
+        return;
+    };
+    let Some(variable) = area.variable.as_ref().filter(|_| is_faulted) else {
+        commands.entity(entity).remove::<FaultClearRequested>();
+        return;
+    };
+    let Some(control) = control.as_deref() else {
+        commands.entity(entity).remove::<FaultClearRequested>();
+        return;
+    };
+
+    if control
+        .set_variable(variable.stream_id, &variable.name, 0.0)
+        .is_err()
+    {
+        commands.entity(entity).remove::<FaultClearRequested>();
     }
 }
 
@@ -435,7 +455,7 @@ fn handle_fault_control_error(
         Entity,
         &FaultArea,
         Has<FaultRequested>,
-        Has<FaultResetRequested>,
+        Has<FaultClearRequested>,
     )>,
 ) {
     let NypaDbControlOperation::SetVariable {
@@ -448,7 +468,7 @@ fn handle_fault_control_error(
         return;
     };
 
-    for (entity, area, activation_requested, reset_requested) in &fault_areas {
+    for (entity, area, activation_requested, clear_requested) in &fault_areas {
         let Some(variable) = &area.variable else {
             continue;
         };
@@ -460,12 +480,8 @@ fn handle_fault_control_error(
             commands.entity(entity).remove::<FaultRequested>();
         }
 
-        if reset_requested && *value < 0.5 {
-            let mut entity_commands = commands.entity(entity);
-            entity_commands.remove::<FaultResetRequested>();
-            if let Some(timeout) = area.auto_reset_after {
-                entity_commands.insert(FaultAutoReset(Timer::new(timeout, TimerMode::Once)));
-            }
+        if clear_requested && *value < 0.5 {
+            commands.entity(entity).remove::<FaultClearRequested>();
         }
     }
 }
@@ -518,33 +534,18 @@ fn animate_fault_senders(
 fn auto_reset_faults(
     mut commands: Commands,
     time: Res<Time>,
-    control: Option<Res<NypaDbControl>>,
-    mut faults: Query<(Entity, &FaultArea, &mut FaultAutoReset), With<Faulted>>,
+    mut faults: Query<(Entity, &mut FaultAutoReset), With<Faulted>>,
 ) {
-    for (entity, area, mut reset) in &mut faults {
+    for (entity, mut reset) in &mut faults {
         reset.0.tick(time.delta());
         if !reset.0.just_finished() {
             continue;
         }
 
-        let Some(variable) = &area.variable else {
-            commands.entity(entity).remove::<FaultAutoReset>();
-            continue;
-        };
-        let Some(control) = control.as_deref() else {
-            reset.0.reset();
-            continue;
-        };
-
-        match control.set_variable(variable.stream_id, &variable.name, 0.0) {
-            Ok(()) => {
-                commands
-                    .entity(entity)
-                    .remove::<FaultAutoReset>()
-                    .insert(FaultResetRequested);
-            }
-            Err(_) => reset.0.reset(),
-        }
+        commands
+            .entity(entity)
+            .remove::<FaultAutoReset>()
+            .insert(FaultClearRequested);
     }
 }
 
@@ -829,11 +830,8 @@ mod tests {
     }
 
     #[test]
-    fn fault_area_defaults_to_one_second_auto_reset() {
-        assert_eq!(
-            FaultArea::default().auto_reset_after,
-            Some(Duration::from_secs(1))
-        );
+    fn fault_area_defaults_to_manual_clear() {
+        assert_eq!(FaultArea::default().auto_reset_after, None);
     }
 
     #[test]
@@ -843,7 +841,10 @@ mod tests {
         app.add_systems(Update, sync_faulted_from_variables);
         let fault = app
             .world_mut()
-            .spawn((FaultArea::variable(0, "fault"), FaultRequested))
+            .spawn((
+                FaultArea::variable(0, "fault").with_auto_reset_after(Duration::from_secs(1)),
+                FaultRequested,
+            ))
             .id();
 
         app.update();
@@ -861,10 +862,7 @@ mod tests {
         app.add_systems(Update, sync_faulted_from_variables);
         let fault = app
             .world_mut()
-            .spawn((
-                FaultArea::variable(0, "fault").without_auto_reset(),
-                FaultRequested,
-            ))
+            .spawn((FaultArea::variable(0, "fault"), FaultRequested))
             .id();
 
         app.update();
@@ -900,7 +898,7 @@ mod tests {
                 FaultArea::variable(0, "fault"),
                 Faulted,
                 FaultAutoReset(Timer::new(Duration::from_secs(1), TimerMode::Once)),
-                FaultResetRequested,
+                FaultClearRequested,
             ))
             .id();
 
@@ -909,7 +907,101 @@ mod tests {
         let entity = app.world().entity(fault);
         assert!(!entity.contains::<Faulted>());
         assert!(!entity.contains::<FaultAutoReset>());
-        assert!(!entity.contains::<FaultResetRequested>());
+        assert!(!entity.contains::<FaultClearRequested>());
+    }
+
+    #[test]
+    fn elapsed_auto_reset_requests_the_normal_clear_path() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.add_systems(Update, auto_reset_faults);
+        let fault = app
+            .world_mut()
+            .spawn((
+                Faulted,
+                FaultAutoReset(Timer::new(Duration::from_millis(1), TimerMode::Once)),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_millis(2));
+
+        app.update();
+
+        let entity = app.world().entity(fault);
+        assert!(!entity.contains::<FaultAutoReset>());
+        assert!(entity.contains::<FaultClearRequested>());
+    }
+
+    #[test]
+    fn clear_request_is_removed_when_it_cannot_be_queued() {
+        let mut app = App::new();
+        app.add_observer(handle_fault_clear_requested);
+        let fault = app
+            .world_mut()
+            .spawn((FaultArea::variable(0, "fault"), Faulted))
+            .id();
+
+        app.world_mut()
+            .entity_mut(fault)
+            .insert(FaultClearRequested);
+        app.update();
+
+        let entity = app.world().entity(fault);
+        assert!(entity.contains::<Faulted>());
+        assert!(!entity.contains::<FaultClearRequested>());
+    }
+
+    #[test]
+    fn clear_request_is_removed_after_successful_response() {
+        let mut app = App::new();
+        app.add_observer(handle_fault_variable_set);
+        let fault = app
+            .world_mut()
+            .spawn((
+                FaultArea::variable(0, "fault"),
+                Faulted,
+                FaultClearRequested,
+            ))
+            .id();
+
+        app.world_mut().trigger(NypaDbVariableSet {
+            stream_id: 0,
+            name: "fault".to_string(),
+            value: 0.0,
+        });
+        app.update();
+
+        assert!(!app.world().entity(fault).contains::<FaultClearRequested>());
+    }
+
+    #[test]
+    fn clear_request_is_removed_after_failed_response() {
+        let mut app = App::new();
+        app.add_observer(handle_fault_control_error);
+        let fault = app
+            .world_mut()
+            .spawn((
+                FaultArea::variable(0, "fault"),
+                Faulted,
+                FaultClearRequested,
+            ))
+            .id();
+
+        app.world_mut().trigger(NypaDbControlError {
+            stream_id: 0,
+            operation: NypaDbControlOperation::SetVariable {
+                stream_id: 0,
+                name: "fault".to_string(),
+                value: 0.0,
+                options: NypaDbSetVariableOptions::default(),
+            },
+            message: "rejected".to_string(),
+        });
+        app.update();
+
+        assert!(app.world().entity(fault).contains::<Faulted>());
+        assert!(!app.world().entity(fault).contains::<FaultClearRequested>());
     }
 
     fn test_variables(value: f32) -> NypaDbVariables {
