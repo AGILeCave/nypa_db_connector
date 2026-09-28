@@ -42,6 +42,7 @@ impl Plugin for NypaDbFaultPlugin {
             TimerMode::Repeating,
         )))
         .add_observer(trigger_fault_throw)
+        .add_observer(handle_fault_impact)
         .add_observer(handle_fault_clear_requested)
         .add_observer(handle_fault_variable_set)
         .add_observer(handle_fault_control_error)
@@ -54,7 +55,6 @@ impl Plugin for NypaDbFaultPlugin {
                 update_fault_marker_visibility,
                 animate_fault_senders,
                 auto_reset_faults,
-                spawn_fault_impacts,
                 update_fault_impacts,
                 rotate_option_markers,
             )
@@ -168,6 +168,13 @@ pub struct NypaDbFaultTrigger {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct FaultThrow {
     pub target: Entity,
+}
+
+/// Emitted when a fault throw reaches its target.
+#[derive(Clone, Copy, Debug, Event)]
+pub struct FaultImpact {
+    pub target: Entity,
+    pub position: Vec3,
 }
 
 #[derive(Component)]
@@ -522,6 +529,10 @@ fn animate_fault_senders(
         );
 
         if t >= 1.0 {
+            commands.trigger(FaultImpact {
+                target: sender.fault,
+                position: sender.end,
+            });
             commands.entity(entity).despawn();
 
             if let Ok(area) = areas.get(sender.fault) {
@@ -575,24 +586,20 @@ fn request_fault_activation(
     }
 }
 
-fn spawn_fault_impacts(
+fn handle_fault_impact(
+    impact: On<FaultImpact>,
     mut commands: Commands,
     server: Res<AssetServer>,
-    faulted: Query<&GlobalTransform, (With<FaultArea>, Added<Faulted>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for transform in &faulted {
-        //commands.entity(entity).insert(FaultImpactSpawned);
-
-        spawn_fault_impact(
-            &mut commands,
-            &server,
-            &mut meshes,
-            &mut materials,
-            transform.translation(),
-        );
-    }
+    spawn_fault_impact(
+        &mut commands,
+        &server,
+        &mut meshes,
+        &mut materials,
+        impact.event().position,
+    );
 }
 
 fn update_fault_impacts(
@@ -810,6 +817,13 @@ mod tests {
         NypaDbVariable, NypaDbVariableSemantic, NypaDbVariableStrategy, NypaDbVariableStream,
     };
 
+    #[derive(Resource, Default)]
+    struct RecordedImpacts(Vec<FaultImpact>);
+
+    fn record_fault_impact(impact: On<FaultImpact>, mut recorded: ResMut<RecordedImpacts>) {
+        recorded.0.push(*impact.event());
+    }
+
     #[test]
     fn arc_position_reaches_endpoints() {
         let start = Vec3::new(1.0, 2.0, 3.0);
@@ -827,6 +841,39 @@ mod tests {
 
         assert_eq!(midpoint.x, 0.5);
         assert!(midpoint.y > 0.0);
+    }
+
+    #[test]
+    fn completed_throw_emits_impact_without_changing_faulted() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.init_resource::<RecordedImpacts>();
+        app.add_observer(record_fault_impact);
+        app.add_systems(Update, animate_fault_senders);
+
+        let target = app.world_mut().spawn(FaultArea::default()).id();
+        let end = Vec3::new(1.0, 2.0, 3.0);
+        app.world_mut().spawn((
+            Transform::default(),
+            FaultThrowAnimation {
+                fault: target,
+                start: Vec3::ZERO,
+                end,
+                elapsed: 0.0,
+                duration: 1.0,
+            },
+        ));
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs(1));
+
+        app.update();
+
+        let impacts = &app.world().resource::<RecordedImpacts>().0;
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].target, target);
+        assert_eq!(impacts[0].position, end);
+        assert!(!app.world().entity(target).contains::<Faulted>());
     }
 
     #[test]

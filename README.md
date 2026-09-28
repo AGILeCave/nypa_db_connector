@@ -84,6 +84,8 @@ is added and removed only to reflect the DB's reported value. Faults remain acti
 you add `FaultClearRequested` to request that their variable be set back to zero. Configure an
 automatic clear explicitly with `FaultArea::with_auto_reset_after`.
 
+Upgrading from commit `3abdaae`? See the [fault migration guide](FAULTS_MIGRATION.md).
+
 The moving throw entity has a public `FaultThrow` component; observe that component being added to
 attach your own model, lights, particles, or audio. Content attached as a child follows the
 library-managed arc and is despawned with the throw on impact.
