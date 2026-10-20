@@ -2,29 +2,60 @@
 A Bevy plugin to connect to a NYPA db
 
 ```rust
-use nypa_db_connector::{FlatFileFormat, NypaDbClientPlugin};
+use nypa_db_connector::{
+    FlatFileFormat, NypaDbClientPlugin, NypaDbPrerecordedSource,
+};
 
-// Default: discover and connect to NYPA DB publisher sockets.
-app.add_plugins(NypaDbClientPlugin::default());
+// Connect to live sockets, with no prerecorded startup fallback.
+app.add_plugins(NypaDbClientPlugin::new(None));
 
-// Debug replay: read one f32 timestep from a flat file per Bevy update.
-app.add_plugins(NypaDbClientPlugin::flat_file(
-    "capture.bin",
-    FlatFileFormat::F32 { variable_count: 128 },
-));
+// Prefer live sockets. If none can be connected during startup, read one f32
+// timestep from this prerecorded file per Bevy update.
+app.add_plugins(NypaDbClientPlugin::new(Some(
+    NypaDbPrerecordedSource::new(
+        "capture.bin",
+        FlatFileFormat::F32 { variable_count: 128 },
+    ),
+)));
 
 // Faster replay: emit one timestep, skip three, then emit the next.
-app.add_plugins(NypaDbClientPlugin::flat_file_with_skip(
-    "capture.bin",
-    FlatFileFormat::F32 { variable_count: 128 },
-    3,
-));
+app.add_plugins(NypaDbClientPlugin::new(Some(
+    NypaDbPrerecordedSource::new(
+        "capture.bin",
+        FlatFileFormat::F32 { variable_count: 128 },
+    )
+    .with_skip(3),
+)));
 
 // Debug replay: read sentinel-wrapped f64 timesteps and convert payloads to f32.
-app.add_plugins(NypaDbClientPlugin::flat_file(
-    "capture_f64.bin",
-    FlatFileFormat::SentinelF64 { variable_count: 128 },
-));
+app.add_plugins(NypaDbClientPlugin::new(Some(
+    NypaDbPrerecordedSource::new(
+        "capture_f64.bin",
+        FlatFileFormat::SentinelF64 { variable_count: 128 },
+    ),
+)));
+```
+
+The current source is queryable through `NYPADBLink::mode()`. Observe
+`NypaDbConnectionModeChanged` to update UI or graphics whenever it changes. Live sockets always
+take priority. A prerecorded source is considered only during startup; after startup, losing a live
+connection changes the mode to `Idle`, never back to `Prerecorded`.
+
+```rust
+use bevy::prelude::*;
+use nypa_db_connector::{
+    NYPADBLink, NypaDbConnectionModeChanged,
+};
+
+fn current_mode(link: Res<NYPADBLink>) {
+    println!("NYPA DB mode: {:?}", link.mode());
+}
+
+fn mode_changed(change: On<NypaDbConnectionModeChanged>) {
+    println!("NYPA DB mode: {:?} -> {:?}", change.previous, change.current);
+}
+
+app.add_observer(mode_changed);
 ```
 
 Variable command/control is a separate plugin. It uses NYPA DB's JSON-RPC CnC endpoint and queues

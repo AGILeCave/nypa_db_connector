@@ -44,24 +44,6 @@ impl FlatFileReplay {
         })
     }
 
-    pub(crate) fn closed(format: FlatFileFormat, skip: usize) -> Self {
-        Self {
-            path: None,
-            reader: None,
-            format,
-            skip,
-            has_emitted_frame: false,
-            finished: true,
-            f64_cache: f64_cache_for_format(format),
-        }
-    }
-
-    pub(crate) fn mark_finished(&mut self) {
-        self.path = None;
-        self.reader = None;
-        self.finished = true;
-    }
-
     pub(crate) fn read_next(&mut self) -> Result<FlatFileRead> {
         if self.has_emitted_frame {
             for _ in 0..self.skip {

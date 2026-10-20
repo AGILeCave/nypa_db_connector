@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,220 +17,152 @@ use crate::{
     socket::{ReaderEventKind, ReaderHandle, spawn_reader},
 };
 
+/// Configuration for the optional prerecorded fallback used during startup.
 #[derive(Clone, Debug)]
-pub struct NypaDbClientPlugin {
-    source: NypaDbClientSource,
+pub struct NypaDbPrerecordedSource {
+    pub path: PathBuf,
+    pub format: FlatFileFormat,
+    pub stream_id: usize,
+    /// Number of complete timesteps to discard between emitted timesteps.
+    pub skip: usize,
 }
 
-impl Default for NypaDbClientPlugin {
-    fn default() -> Self {
-        Self::sockets()
+impl NypaDbPrerecordedSource {
+    /// Replay one stream from a flat file, advancing one timestep per Bevy update.
+    pub fn new(path: impl Into<PathBuf>, format: FlatFileFormat) -> Self {
+        Self {
+            path: path.into(),
+            format,
+            stream_id: 0,
+            skip: 0,
+        }
     }
+
+    /// Set the stream id assigned to frames from this source.
+    pub fn with_stream_id(mut self, stream_id: usize) -> Self {
+        self.stream_id = stream_id;
+        self
+    }
+
+    /// Set the number of complete timesteps discarded between emitted timesteps.
+    pub fn with_skip(mut self, skip: usize) -> Self {
+        self.skip = skip;
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NypaDbClientPlugin {
+    prerecorded: Option<NypaDbPrerecordedSource>,
 }
 
 impl NypaDbClientPlugin {
-    /// Connect to active NYPA DB publisher sockets.
-    pub fn sockets() -> Self {
-        Self {
-            source: NypaDbClientSource::Sockets,
-        }
+    /// Prefer live publisher sockets, using `prerecorded` only when no socket can be connected
+    /// during startup.
+    pub fn new(prerecorded: Option<NypaDbPrerecordedSource>) -> Self {
+        Self { prerecorded }
     }
-
-    /// Replay one stream from a flat file, advancing one timestep per Bevy update.
-    pub fn flat_file(path: impl Into<PathBuf>, format: FlatFileFormat) -> Self {
-        Self::flat_file_with_stream_id(path, format, 0)
-    }
-
-    /// Replay one stream from a flat file, skipping timesteps between Bevy updates.
-    ///
-    /// A `skip` of zero emits every timestep, one emits every other timestep, and so on.
-    pub fn flat_file_with_skip(
-        path: impl Into<PathBuf>,
-        format: FlatFileFormat,
-        skip: usize,
-    ) -> Self {
-        Self::flat_file_with_stream_id_and_skip(path, format, 0, skip)
-    }
-
-    /// Replay one stream from a flat file with a caller-selected stream id.
-    pub fn flat_file_with_stream_id(
-        path: impl Into<PathBuf>,
-        format: FlatFileFormat,
-        stream_id: usize,
-    ) -> Self {
-        Self::flat_file_with_stream_id_and_skip(path, format, stream_id, 0)
-    }
-
-    /// Replay a flat file with a caller-selected stream id and timestep skip count.
-    pub fn flat_file_with_stream_id_and_skip(
-        path: impl Into<PathBuf>,
-        format: FlatFileFormat,
-        stream_id: usize,
-        skip: usize,
-    ) -> Self {
-        Self {
-            source: NypaDbClientSource::FlatFile {
-                path: path.into(),
-                format,
-                stream_id,
-                skip,
-            },
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum NypaDbClientSource {
-    Sockets,
-    FlatFile {
-        path: PathBuf,
-        format: FlatFileFormat,
-        stream_id: usize,
-        /// Number of complete timesteps to discard between emitted timesteps.
-        skip: usize,
-    },
 }
 
 impl Plugin for NypaDbClientPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, drain_nypa_frames);
+        let link = NYPADBLink::start(self.prerecorded.as_ref());
 
-        app.insert_resource(NYPADBLink::with_source(self.source.clone()));
-
-        app.add_systems(Update, check_for_reconnect);
+        app.insert_resource(link)
+            .add_systems(Startup, announce_initial_connection_mode)
+            .add_systems(Update, (drain_nypa_frames, check_for_source_change).chain());
     }
+}
+
+/// The source currently supplying NYPA DB frames.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NypaDbConnectionMode {
+    /// One or more publisher sockets are connected.
+    Streaming,
+    /// The startup fallback file is supplying frames.
+    Prerecorded,
+    /// No frame source is currently available.
+    #[default]
+    Idle,
+}
+
+/// Triggered whenever the active frame source mode changes.
+#[derive(Clone, Copy, Debug, Event, Eq, PartialEq)]
+pub struct NypaDbConnectionModeChanged {
+    pub previous: NypaDbConnectionMode,
+    pub current: NypaDbConnectionMode,
 }
 
 #[derive(Resource)]
 pub struct NYPADBLink {
     pub streams: Vec<PerStreamContent>,
-    source_config: NypaDbClientSource,
     source: NypaDbSourceState,
     stop: Arc<AtomicBool>,
     last_check: Instant,
 }
 
-impl Default for NYPADBLink {
-    fn default() -> Self {
-        Self {
-            streams: Default::default(),
-            source_config: NypaDbClientSource::Sockets,
-            source: NypaDbSourceState::Sockets,
-            stop: Default::default(),
-            last_check: Instant::now(),
-        }
-    }
-}
-
 impl NYPADBLink {
-    pub fn start() -> Self {
-        Self::with_source(NypaDbClientSource::Sockets)
-    }
-
-    pub fn with_source(source_config: NypaDbClientSource) -> Self {
+    fn start(prerecorded: Option<&NypaDbPrerecordedSource>) -> Self {
         let stop = Arc::new(AtomicBool::default());
+        let streams = connect_socket_streams(stop.clone());
 
-        match &source_config {
-            NypaDbClientSource::Sockets => start_socket_link(source_config, stop),
-            NypaDbClientSource::FlatFile {
-                path,
-                format,
-                stream_id,
-                skip,
-            } => start_file_link(
-                source_config.clone(),
-                stop,
-                path,
-                *format,
-                *stream_id,
-                *skip,
-            ),
-        }
-    }
-
-    pub fn restart(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        *self = Self::with_source(self.source_config.clone());
-    }
-}
-
-fn start_socket_link(source_config: NypaDbClientSource, stop: Arc<AtomicBool>) -> NYPADBLink {
-    let sockets = match find_publisher_sockets() {
-        Ok(sockets) => sockets,
-        Err(err) => {
-            eprintln!("NYPA DB publisher discovery failed: {err}");
-            return NYPADBLink {
-                streams: vec![],
-                source_config,
-                source: NypaDbSourceState::Sockets,
+        if !streams.is_empty() {
+            return Self {
+                streams,
+                source: NypaDbSourceState::Streaming,
                 stop,
                 last_check: Instant::now(),
             };
         }
-    };
-
-    let streams = sockets
-        .into_iter()
-        .filter_map(|path| {
-            let stream_id = stream_id_from_socket_path(&path)?;
-
-            let handle = match spawn_reader(stop.clone(), path) {
-                Ok(reader) => reader,
-                Err(err) => {
-                    eprintln!("NYPA DB stream {stream_id} connect failed: {err}");
-                    return None;
-                }
-            };
-
-            Some(PerStreamContent {
-                stream_id,
-                frame: DataFrame::default(),
-                handle: Some(handle),
-            })
-        })
-        .collect();
-
-    NYPADBLink {
-        streams,
-        source_config,
-        source: NypaDbSourceState::Sockets,
-        stop,
-        last_check: Instant::now(),
-    }
-}
-
-fn start_file_link(
-    source_config: NypaDbClientSource,
-    stop: Arc<AtomicBool>,
-    path: &Path,
-    format: FlatFileFormat,
-    stream_id: usize,
-    skip: usize,
-) -> NYPADBLink {
-    let (source, streams) = match FlatFileReplay::open(path, format, skip) {
-        Ok(replay) => (
-            NypaDbSourceState::FlatFile(replay),
-            vec![PerStreamContent {
-                stream_id,
-                frame: DataFrame::default(),
-                handle: None,
-            }],
-        ),
-        Err(err) => {
-            eprintln!("NYPA DB flat-file replay open failed: {err}");
-            (
-                NypaDbSourceState::FlatFile(FlatFileReplay::closed(format, skip)),
-                vec![],
-            )
+        if let Some(config) = prerecorded {
+            return Self::start_prerecorded(config, stop);
         }
-    };
+        Self::idle(stop)
+    }
 
-    NYPADBLink {
-        streams,
-        source_config,
-        source,
-        stop,
-        last_check: Instant::now(),
+    fn start_prerecorded(config: &NypaDbPrerecordedSource, stop: Arc<AtomicBool>) -> Self {
+        match FlatFileReplay::open(&config.path, config.format, config.skip) {
+            Ok(replay) => Self {
+                streams: vec![PerStreamContent {
+                    stream_id: config.stream_id,
+                    frame: DataFrame::default(),
+                    handle: None,
+                }],
+                source: NypaDbSourceState::Prerecorded(replay),
+                stop,
+                last_check: Instant::now(),
+            },
+            Err(err) => {
+                eprintln!("NYPA DB prerecorded file open failed: {err}");
+                Self::idle(stop)
+            }
+        }
+    }
+
+    fn idle(stop: Arc<AtomicBool>) -> Self {
+        Self {
+            streams: vec![],
+            source: NypaDbSourceState::Idle,
+            stop,
+            last_check: Instant::now(),
+        }
+    }
+
+    /// Return the source currently supplying frames.
+    pub fn mode(&self) -> NypaDbConnectionMode {
+        match self.source {
+            NypaDbSourceState::Streaming => NypaDbConnectionMode::Streaming,
+            NypaDbSourceState::Prerecorded(_) => NypaDbConnectionMode::Prerecorded,
+            NypaDbSourceState::Idle => NypaDbConnectionMode::Idle,
+        }
+    }
+
+    fn replace_with_idle(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.stop = Arc::new(AtomicBool::default());
+        self.streams.clear();
+        self.source = NypaDbSourceState::Idle;
+        self.last_check = Instant::now();
     }
 }
 
@@ -244,9 +176,7 @@ impl Drop for NYPADBLink {
 pub struct PerStreamContent {
     /// Publisher stream id.
     pub stream_id: usize,
-
     pub frame: DataFrame,
-
     /// Internal handle to reader thread.
     handle: Option<ReaderHandle>,
 }
@@ -261,53 +191,125 @@ pub struct NypaDbFramesChanged {
 }
 
 enum NypaDbSourceState {
-    Sockets,
-    FlatFile(FlatFileReplay),
+    Streaming,
+    Prerecorded(FlatFileReplay),
+    Idle,
 }
 
-fn check_for_reconnect(mut frames: ResMut<NYPADBLink>) {
-    if !matches!(frames.source, NypaDbSourceState::Sockets) {
-        return;
-    }
-
-    let new_now = Instant::now();
-
-    if new_now.duration_since(frames.last_check).as_secs_f32() < 1.0 {
-        return;
-    }
-
-    frames.last_check = new_now;
-
-    let Ok(sockets) = find_publisher_sockets() else {
-        return;
+fn connect_socket_streams(stop: Arc<AtomicBool>) -> Vec<PerStreamContent> {
+    let sockets = match find_publisher_sockets() {
+        Ok(sockets) => sockets,
+        Err(err) => {
+            eprintln!("NYPA DB publisher discovery failed: {err}");
+            return vec![];
+        }
     };
 
-    let sockets: HashSet<_> = sockets
+    sockets
         .into_iter()
-        .filter_map(|x| stream_id_from_socket_path(&x))
-        .collect();
+        .filter_map(|path| {
+            let stream_id = stream_id_from_socket_path(&path)?;
+            let handle = match spawn_reader(stop.clone(), path) {
+                Ok(reader) => reader,
+                Err(err) => {
+                    eprintln!("NYPA DB stream {stream_id} connect failed: {err}");
+                    return None;
+                }
+            };
+            Some(PerStreamContent {
+                stream_id,
+                frame: DataFrame::default(),
+                handle: Some(handle),
+            })
+        })
+        .collect()
+}
 
-    let current_sockets: HashSet<_> = frames.streams.iter().map(|x| x.stream_id).collect();
-
-    if sockets != current_sockets {
-        frames.restart();
+fn announce_initial_connection_mode(link: Res<NYPADBLink>, mut commands: Commands) {
+    let current = link.mode();
+    if current != NypaDbConnectionMode::Idle {
+        commands.trigger(NypaDbConnectionModeChanged {
+            previous: NypaDbConnectionMode::Idle,
+            current,
+        });
     }
 }
 
-fn drain_nypa_frames(mut frames: ResMut<NYPADBLink>, mut commands: Commands) {
-    if matches!(frames.source, NypaDbSourceState::Sockets) {
-        drain_socket_frames(&mut frames, &mut commands);
-    } else {
-        drain_file_frame(&mut frames, &mut commands);
+fn check_for_source_change(mut link: ResMut<NYPADBLink>, mut commands: Commands) {
+    let now = Instant::now();
+    if now.duration_since(link.last_check).as_secs_f32() < 1.0 {
+        return;
+    }
+    link.last_check = now;
+
+    match link.mode() {
+        NypaDbConnectionMode::Prerecorded | NypaDbConnectionMode::Idle => {
+            let candidate_stop = Arc::new(AtomicBool::default());
+            let streams = connect_socket_streams(candidate_stop.clone());
+            if streams.is_empty() {
+                return;
+            }
+
+            let previous = link.mode();
+            link.stop.store(true, Ordering::Release);
+            link.stop = candidate_stop;
+            link.streams = streams;
+            link.source = NypaDbSourceState::Streaming;
+            link.last_check = Instant::now();
+            commands.trigger(NypaDbConnectionModeChanged {
+                previous,
+                current: NypaDbConnectionMode::Streaming,
+            });
+        }
+        NypaDbConnectionMode::Streaming => {
+            let discovered = match find_publisher_sockets() {
+                Ok(sockets) => sockets,
+                Err(_) => return,
+            };
+            let discovered_ids: HashSet<_> = discovered
+                .iter()
+                .filter_map(|path| stream_id_from_socket_path(path))
+                .collect();
+            let connected_ids: HashSet<_> =
+                link.streams.iter().map(|stream| stream.stream_id).collect();
+
+            if discovered_ids == connected_ids {
+                return;
+            }
+
+            let candidate_stop = Arc::new(AtomicBool::default());
+            let streams = connect_socket_streams(candidate_stop.clone());
+            if streams.is_empty() {
+                candidate_stop.store(true, Ordering::Release);
+                link.replace_with_idle();
+                commands.trigger(NypaDbConnectionModeChanged {
+                    previous: NypaDbConnectionMode::Streaming,
+                    current: NypaDbConnectionMode::Idle,
+                });
+            } else {
+                link.stop.store(true, Ordering::Release);
+                link.stop = candidate_stop;
+                link.streams = streams;
+                link.source = NypaDbSourceState::Streaming;
+                link.last_check = Instant::now();
+            }
+        }
     }
 }
 
-fn drain_socket_frames(frames: &mut NYPADBLink, commands: &mut Commands) {
-    frames.streams.retain_mut(|stream| {
+fn drain_nypa_frames(mut link: ResMut<NYPADBLink>, mut commands: Commands) {
+    match link.source {
+        NypaDbSourceState::Streaming => drain_socket_frames(&mut link, &mut commands),
+        NypaDbSourceState::Prerecorded(_) => drain_file_frame(&mut link, &mut commands),
+        NypaDbSourceState::Idle => {}
+    }
+}
+
+fn drain_socket_frames(link: &mut NYPADBLink, commands: &mut Commands) {
+    link.streams.retain_mut(|stream| {
         let Some(handle) = &mut stream.handle else {
             return true;
         };
-
         let mut keep_stream = true;
         let changed = handle.drain(|event| match &event.kind {
             ReaderEventKind::Frame => {
@@ -322,24 +324,27 @@ fn drain_socket_frames(frames: &mut NYPADBLink, commands: &mut Commands) {
                 keep_stream = false;
             }
         });
-
-        if !changed {
-            return true;
-        }
-
-        keep_stream
+        !changed || keep_stream
     });
+
+    if link.streams.is_empty() {
+        link.replace_with_idle();
+        commands.trigger(NypaDbConnectionModeChanged {
+            previous: NypaDbConnectionMode::Streaming,
+            current: NypaDbConnectionMode::Idle,
+        });
+    }
 }
 
-fn drain_file_frame(frames: &mut NYPADBLink, commands: &mut Commands) {
-    let result = match &mut frames.source {
-        NypaDbSourceState::FlatFile(replay) => replay.read_next(),
-        NypaDbSourceState::Sockets => return,
+fn drain_file_frame(link: &mut NYPADBLink, commands: &mut Commands) {
+    let result = match &mut link.source {
+        NypaDbSourceState::Prerecorded(replay) => replay.read_next(),
+        _ => return,
     };
 
     match result {
         Ok(FlatFileRead::Frame(frame)) => {
-            if let Some(stream) = frames.streams.first_mut() {
+            if let Some(stream) = link.streams.first_mut() {
                 stream.frame.copy_from(&frame);
                 commands.trigger(NypaDbFramesChanged {
                     stream_id: stream.stream_id,
@@ -349,10 +354,77 @@ fn drain_file_frame(frames: &mut NYPADBLink, commands: &mut Commands) {
         }
         Ok(FlatFileRead::Closed) => {}
         Err(err) => {
-            eprintln!("NYPA DB flat-file replay read failed: {err}");
-            if let NypaDbSourceState::FlatFile(replay) = &mut frames.source {
-                replay.mark_finished();
-            }
+            eprintln!("NYPA DB prerecorded file read failed: {err}");
+            link.replace_with_idle();
+            commands.trigger(NypaDbConnectionModeChanged {
+                previous: NypaDbConnectionMode::Prerecorded,
+                current: NypaDbConnectionMode::Idle,
+            });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[derive(Resource, Default)]
+    struct ObservedModeChanges(Vec<NypaDbConnectionModeChanged>);
+
+    fn record_mode_change(
+        change: On<NypaDbConnectionModeChanged>,
+        mut observed: ResMut<ObservedModeChanges>,
+    ) {
+        observed.0.push(*change);
+    }
+
+    #[test]
+    fn prerecorded_builder_sets_optional_playback_values() {
+        let source =
+            NypaDbPrerecordedSource::new("capture.bin", FlatFileFormat::F32 { variable_count: 2 })
+                .with_stream_id(7)
+                .with_skip(3);
+
+        assert_eq!(source.path, Path::new("capture.bin"));
+        assert_eq!(source.stream_id, 7);
+        assert_eq!(source.skip, 3);
+    }
+
+    #[test]
+    fn missing_prerecorded_file_is_idle() {
+        let stop = Arc::new(AtomicBool::default());
+        let source = NypaDbPrerecordedSource::new(
+            "/a/path/that/does/not/exist/capture.bin",
+            FlatFileFormat::F32 { variable_count: 2 },
+        );
+        let link = NYPADBLink::start_prerecorded(&source, stop);
+
+        assert_eq!(link.mode(), NypaDbConnectionMode::Idle);
+        assert!(link.streams.is_empty());
+    }
+
+    #[test]
+    fn initial_non_idle_mode_is_observable() {
+        let mut app = App::new();
+        app.insert_resource(NYPADBLink {
+            streams: vec![],
+            source: NypaDbSourceState::Streaming,
+            stop: Arc::new(AtomicBool::default()),
+            last_check: Instant::now(),
+        })
+        .init_resource::<ObservedModeChanges>()
+        .add_observer(record_mode_change)
+        .add_systems(Startup, announce_initial_connection_mode);
+
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<ObservedModeChanges>().0,
+            [NypaDbConnectionModeChanged {
+                previous: NypaDbConnectionMode::Idle,
+                current: NypaDbConnectionMode::Streaming,
+            }]
+        );
     }
 }

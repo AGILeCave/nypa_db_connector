@@ -3,10 +3,9 @@
 //! This uses only `bevy_app` and `bevy_ecs` from Bevy. The NYPA DB publisher protocol helpers are
 //! included so the crate can be used without depending on the `nypa_db` Rust crate API.
 //!
-//! By default, the plugin discovers active NYPA DB publisher sockets, spawns one blocking reader
-//! thread per stream, keeps one frame buffer per stream, and triggers `NypaDbFramesChanged` whenever
-//! a stream buffer is updated. For testing and debugging, the plugin can also replay a flat file one
-//! timestep per Bevy update.
+//! The plugin first tries to connect to active NYPA DB publisher sockets. If none can be connected
+//! during startup, it can replay an optional prerecorded file. It keeps one frame buffer per stream
+//! and triggers `NypaDbFramesChanged` whenever a stream buffer is updated.
 
 mod control;
 mod discovery;
@@ -31,5 +30,6 @@ pub use faults::{
 pub use flat_file::FlatFileFormat;
 pub use frame::DataFrame;
 pub use plugin::{
-    NYPADBLink, NypaDbClientPlugin, NypaDbClientSource, NypaDbFramesChanged, PerStreamContent,
+    NYPADBLink, NypaDbClientPlugin, NypaDbConnectionMode, NypaDbConnectionModeChanged,
+    NypaDbFramesChanged, NypaDbPrerecordedSource, PerStreamContent,
 };
