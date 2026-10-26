@@ -448,7 +448,7 @@ fn handle_fault_clear_requested(
     };
 
     if control
-        .set_variable(variable.stream_id, &variable.name, 0.0)
+        .reset_variable(variable.stream_id, &variable.name)
         .is_err()
     {
         commands.entity(entity).remove::<FaultClearRequested>();
@@ -465,29 +465,30 @@ fn handle_fault_control_error(
         Has<FaultClearRequested>,
     )>,
 ) {
-    let NypaDbControlOperation::SetVariable {
-        stream_id,
-        name,
-        value,
-        ..
-    } = &error.event().operation
-    else {
-        return;
+    let (stream_id, name, value) = match &error.event().operation {
+        NypaDbControlOperation::SetVariable {
+            stream_id,
+            name,
+            value,
+            ..
+        } => (*stream_id, name, *value),
+        NypaDbControlOperation::ResetVariable { stream_id, name } => (*stream_id, name, 0.0),
+        _ => return,
     };
 
     for (entity, area, activation_requested, clear_requested) in &fault_areas {
         let Some(variable) = &area.variable else {
             continue;
         };
-        if variable.stream_id != *stream_id || variable.name != *name {
+        if variable.stream_id != stream_id || variable.name != *name {
             continue;
         }
 
-        if activation_requested && *value >= 0.5 {
+        if activation_requested && value >= 0.5 {
             commands.entity(entity).remove::<FaultRequested>();
         }
 
-        if clear_requested && *value < 0.5 {
+        if clear_requested && value < 0.5 {
             commands.entity(entity).remove::<FaultClearRequested>();
         }
     }
@@ -1023,6 +1024,46 @@ mod tests {
     }
 
     #[test]
+    fn successful_clear_response_only_completes_the_matching_fault() {
+        let mut app = App::new();
+        app.add_observer(handle_fault_variable_set);
+        let cleared_fault = app
+            .world_mut()
+            .spawn((
+                FaultArea::variable(0, "cleared_fault"),
+                Faulted,
+                FaultClearRequested,
+            ))
+            .id();
+        let other_fault = app
+            .world_mut()
+            .spawn((
+                FaultArea::variable(0, "other_fault"),
+                Faulted,
+                FaultClearRequested,
+            ))
+            .id();
+
+        app.world_mut().trigger(NypaDbVariableSet {
+            stream_id: 0,
+            name: "cleared_fault".to_string(),
+            value: 0.0,
+        });
+        app.update();
+
+        assert!(
+            !app.world()
+                .entity(cleared_fault)
+                .contains::<FaultClearRequested>()
+        );
+        assert!(
+            app.world()
+                .entity(other_fault)
+                .contains::<FaultClearRequested>()
+        );
+    }
+
+    #[test]
     fn clear_request_is_removed_after_failed_response() {
         let mut app = App::new();
         app.add_observer(handle_fault_control_error);
@@ -1037,11 +1078,9 @@ mod tests {
 
         app.world_mut().trigger(NypaDbControlError {
             stream_id: 0,
-            operation: NypaDbControlOperation::SetVariable {
+            operation: NypaDbControlOperation::ResetVariable {
                 stream_id: 0,
                 name: "fault".to_string(),
-                value: 0.0,
-                options: NypaDbSetVariableOptions::default(),
             },
             message: "rejected".to_string(),
         });

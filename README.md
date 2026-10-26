@@ -77,6 +77,11 @@ fn change_gain(control: Res<NypaDbControl>) {
     let _ = control.set_variable(0, "example_gain", 2.5);
 }
 
+fn clear_one_fault(control: Res<NypaDbControl>) {
+    // Writes only this variable to zero; other variables in stream 0 are unchanged.
+    let _ = control.reset_variable(0, "breaker_fault");
+}
+
 fn change_operating_state(control: Res<NypaDbControl>) {
     // Tuples are accepted for concise, inline batches.
     let _ = control.set_variables(
@@ -112,8 +117,9 @@ Fault behavior and variable activation are available through `NypaDbFaultPlugin`
 to world entities that can be faulted, add one `FaultSpawnSource` where fault throws should start,
 then trigger a throw at a target fault area. A successful request adds `FaultRequested`; `Faulted`
 is added and removed only to reflect the DB's reported value. Faults remain active by default until
-you add `FaultClearRequested` to request that their variable be set back to zero. Configure an
-automatic clear explicitly with `FaultArea::with_auto_reset_after`.
+you add `FaultClearRequested` to reset that fault's variable to zero without resetting any other
+variable in its stream. Configure an automatic clear explicitly with
+`FaultArea::with_auto_reset_after`.
 
 Upgrading from commit `3abdaae`? See the [fault migration guide](FAULTS_MIGRATION.md).
 

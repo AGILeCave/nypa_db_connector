@@ -110,6 +110,22 @@ impl NypaDbControl {
         })
     }
 
+    /// Reset one variable to zero.
+    ///
+    /// This uses the server's single-variable update path so other variables in the stream are
+    /// left unchanged.
+    pub fn reset_variable(
+        &self,
+        stream_id: usize,
+        name: impl Into<String>,
+    ) -> Result<(), NypaDbControlQueueError> {
+        self.send(NypaDbControlOperation::ResetVariable {
+            stream_id,
+            name: name.into(),
+        })
+    }
+
+    /// Reset every variable in a stream to its configured initial value.
     pub fn reset_variables(&self, stream_id: usize) -> Result<(), NypaDbControlQueueError> {
         self.send(NypaDbControlOperation::ResetVariables { stream_id })
     }
@@ -218,6 +234,10 @@ pub enum NypaDbControlOperation {
         stream_id: usize,
         updates: Vec<NypaDbVariableUpdate>,
     },
+    ResetVariable {
+        stream_id: usize,
+        name: String,
+    },
     ResetVariables {
         stream_id: usize,
     },
@@ -229,6 +249,7 @@ impl NypaDbControlOperation {
             Self::GetVariables { stream_id }
             | Self::SetVariable { stream_id, .. }
             | Self::SetVariables { stream_id, .. }
+            | Self::ResetVariable { stream_id, .. }
             | Self::ResetVariables { stream_id } => *stream_id,
         }
     }
@@ -508,7 +529,8 @@ fn send_operation(
                 .map_err(|err| err.to_string())?;
             Ok(ControlResponse::Variables(stream))
         }
-        NypaDbControlOperation::SetVariable { .. } => {
+        NypaDbControlOperation::SetVariable { .. }
+        | NypaDbControlOperation::ResetVariable { .. } => {
             let update = serde_json::from_value::<VariableUpdateResult>(result)
                 .map_err(|err| err.to_string())?;
             Ok(ControlResponse::VariableSet(NypaDbVariableSet {
@@ -569,6 +591,14 @@ fn operation_rpc(operation: &NypaDbControlOperation) -> (&'static str, Value) {
             json!({
                 "stream_id": stream_id,
                 "updates": updates,
+            }),
+        ),
+        NypaDbControlOperation::ResetVariable { stream_id, name } => (
+            "set_variable",
+            json!({
+                "stream_id": stream_id,
+                "name": name,
+                "value": 0.0,
             }),
         ),
         NypaDbControlOperation::ResetVariables { stream_id } => {
@@ -790,6 +820,24 @@ mod tests {
                     { "name": "state_breaker", "value": 1.0 },
                     { "name": "state_setpoint", "value": 0.75 },
                 ],
+            })
+        );
+    }
+
+    #[test]
+    fn reset_variable_uses_targeted_zero_value_rpc_shape() {
+        let (method, params) = operation_rpc(&NypaDbControlOperation::ResetVariable {
+            stream_id: 2,
+            name: "breaker_fault".to_string(),
+        });
+
+        assert_eq!(method, "set_variable");
+        assert_eq!(
+            params,
+            json!({
+                "stream_id": 2,
+                "name": "breaker_fault",
+                "value": 0.0,
             })
         );
     }
