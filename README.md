@@ -15,7 +15,9 @@ app.add_plugins(NypaDbClientPlugin::new(Some(
     NypaDbPrerecordedSource::new(
         "capture.bin",
         FlatFileFormat::F32 { variable_count: 128 },
-    ),
+    )
+    // Route fallback frames and NypaDbFramesChanged events to stream 2.
+    .with_stream_id(2),
 )));
 
 // Faster replay: emit one timestep, skip three, then emit the next.

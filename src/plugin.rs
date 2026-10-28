@@ -29,6 +29,9 @@ pub struct NypaDbPrerecordedSource {
 
 impl NypaDbPrerecordedSource {
     /// Replay one stream from a flat file, advancing one timestep per Bevy update.
+    ///
+    /// Frames default to stream `0`. Use [`Self::with_stream_id`] to assign the fallback to a
+    /// different stream.
     pub fn new(path: impl Into<PathBuf>, format: FlatFileFormat) -> Self {
         Self {
             path: path.into(),
@@ -367,16 +370,30 @@ fn drain_file_frame(link: &mut NYPADBLink, commands: &mut Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[derive(Resource, Default)]
     struct ObservedModeChanges(Vec<NypaDbConnectionModeChanged>);
+
+    #[derive(Resource, Default)]
+    struct ObservedFrameChanges(Vec<NypaDbFramesChanged>);
 
     fn record_mode_change(
         change: On<NypaDbConnectionModeChanged>,
         mut observed: ResMut<ObservedModeChanges>,
     ) {
         observed.0.push(*change);
+    }
+
+    fn record_frame_change(
+        change: On<NypaDbFramesChanged>,
+        mut observed: ResMut<ObservedFrameChanges>,
+    ) {
+        observed.0.push(change.clone());
     }
 
     #[test]
@@ -389,6 +406,45 @@ mod tests {
         assert_eq!(source.path, Path::new("capture.bin"));
         assert_eq!(source.stream_id, 7);
         assert_eq!(source.skip, 3);
+    }
+
+    #[test]
+    fn prerecorded_frames_use_selected_stream_id() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nypa_db_connector_stream_{}_{}.bin",
+            std::process::id(),
+            unique
+        ));
+        let values = [1.25_f32, 2.5_f32];
+        fs::write(&path, bytemuck::cast_slice(&values)).unwrap();
+
+        {
+            let source =
+                NypaDbPrerecordedSource::new(&path, FlatFileFormat::F32 { variable_count: 1 })
+                    .with_stream_id(7);
+            let link = NYPADBLink::start_prerecorded(&source, Arc::new(AtomicBool::default()));
+            let mut app = App::new();
+            app.insert_resource(link)
+                .init_resource::<ObservedFrameChanges>()
+                .add_observer(record_frame_change)
+                .add_systems(Update, drain_nypa_frames);
+
+            app.update();
+
+            let link = app.world().resource::<NYPADBLink>();
+            assert_eq!(link.streams[0].stream_id, 7);
+            assert_eq!(link.streams[0].frame.content, [2.5]);
+            assert_eq!(
+                app.world().resource::<ObservedFrameChanges>().0[0].stream_id,
+                7
+            );
+        }
+
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
