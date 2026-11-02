@@ -43,6 +43,11 @@ The current source is queryable through `NYPADBLink::mode()`. Observe
 take priority. A prerecorded source is considered only during startup; after startup, losing a live
 connection changes the mode to `Idle`, never back to `Prerecorded`.
 
+Each frame and `NypaDbFramesChanged` event also includes a `NypaDbFrameSource`. Its variants
+distinguish `LiveDb`, `RecordedDb`, `FlatFileFallback`, and `Idle` content. `Idle` is the default for
+a frame that has not received content yet; connection-level transitions to idle remain observable
+through `NypaDbConnectionModeChanged`.
+
 ```rust
 use bevy::prelude::*;
 use nypa_db_connector::{

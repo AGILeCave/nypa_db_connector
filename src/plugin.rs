@@ -11,7 +11,7 @@ use std::{
 use bevy::prelude::*;
 
 use crate::{
-    DataFrame, FlatFileFormat,
+    DataFrame, FlatFileFormat, NypaDbFrameSource,
     discovery::{find_publisher_sockets, stream_id_from_socket_path},
     flat_file::{FlatFileRead, FlatFileReplay},
     socket::{ReaderEventKind, ReaderHandle, spawn_reader},
@@ -191,6 +191,8 @@ pub struct NypaDbFramesChanged {
     pub stream_id: usize,
     /// New time.
     pub timestamp_us: u64,
+    /// Origin of the new frame's content.
+    pub source: NypaDbFrameSource,
 }
 
 enum NypaDbSourceState {
@@ -320,6 +322,7 @@ fn drain_socket_frames(link: &mut NYPADBLink, commands: &mut Commands) {
                 commands.trigger(NypaDbFramesChanged {
                     stream_id: stream.stream_id,
                     timestamp_us: event.payload.stamp_us,
+                    source: event.payload.source,
                 });
             }
             ReaderEventKind::Disconnected { reason } => {
@@ -352,6 +355,7 @@ fn drain_file_frame(link: &mut NYPADBLink, commands: &mut Commands) {
                 commands.trigger(NypaDbFramesChanged {
                     stream_id: stream.stream_id,
                     timestamp_us: frame.stamp_us,
+                    source: frame.source,
                 });
             }
         }
@@ -437,11 +441,14 @@ mod tests {
 
             let link = app.world().resource::<NYPADBLink>();
             assert_eq!(link.streams[0].stream_id, 7);
-            assert_eq!(link.streams[0].frame.content, [2.5]);
             assert_eq!(
-                app.world().resource::<ObservedFrameChanges>().0[0].stream_id,
-                7
+                link.streams[0].frame.source,
+                NypaDbFrameSource::FlatFileFallback
             );
+            assert_eq!(link.streams[0].frame.content, [2.5]);
+            let change = &app.world().resource::<ObservedFrameChanges>().0[0];
+            assert_eq!(change.stream_id, 7);
+            assert_eq!(change.source, NypaDbFrameSource::FlatFileFallback);
         }
 
         fs::remove_file(path).unwrap();

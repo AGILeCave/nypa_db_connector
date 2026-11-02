@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::DataFrame;
+use crate::{DataFrame, NypaDbFrameSource};
 
 /// Wire format used for flat-file replay.
 #[derive(Clone, Copy, Debug)]
@@ -135,7 +135,11 @@ fn read_flat_file_f32(source: &mut impl Read, variable_count: usize) -> Result<F
         return Ok(FlatFileRead::Closed);
     };
 
-    Ok(FlatFileRead::Frame(DataFrame { stamp_us, content }))
+    Ok(FlatFileRead::Frame(DataFrame {
+        stamp_us,
+        source: NypaDbFrameSource::FlatFileFallback,
+        content,
+    }))
 }
 
 fn read_flat_file_sentinel_f64(
@@ -186,7 +190,11 @@ fn read_flat_file_sentinel_f64(
         *value = data as f32;
     }
 
-    Ok(FlatFileRead::Frame(DataFrame { stamp_us, content }))
+    Ok(FlatFileRead::Frame(DataFrame {
+        stamp_us,
+        source: NypaDbFrameSource::FlatFileFallback,
+        content,
+    }))
 }
 
 fn read_exact_or_closed(source: &mut impl Read, mut dest: &mut [u8]) -> Result<bool> {
@@ -264,6 +272,7 @@ mod tests {
             panic!("expected frame");
         };
         assert_eq!(frame.stamp_us, 250_000);
+        assert_eq!(frame.source, NypaDbFrameSource::FlatFileFallback);
         assert_eq!(frame.content, [2.0, 5.0, -10.5]);
     }
 
@@ -282,6 +291,7 @@ mod tests {
             panic!("expected frame");
         };
         assert_eq!(frame.stamp_us, 2_250_000);
+        assert_eq!(frame.source, NypaDbFrameSource::FlatFileFallback);
         assert_eq!(frame.content, [6.5, -7.25]);
     }
 
