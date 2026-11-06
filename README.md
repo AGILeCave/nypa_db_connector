@@ -48,6 +48,9 @@ distinguish `LiveDb`, `RecordedDb`, `FlatFileFallback`, and `Idle` content. `Idl
 a frame that has not received content yet; connection-level transitions to idle remain observable
 through `NypaDbConnectionModeChanged`.
 
+`NYPADBLink::streams` is indexed by stream id: content for stream `n` is always stored at
+`streams[n]`. Gaps between published stream ids are retained as slots containing an `Idle` frame.
+
 ```rust
 use bevy::prelude::*;
 use nypa_db_connector::{

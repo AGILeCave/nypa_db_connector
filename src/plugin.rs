@@ -98,6 +98,7 @@ pub struct NypaDbConnectionModeChanged {
 
 #[derive(Resource)]
 pub struct NYPADBLink {
+    /// Frame slots indexed by publisher stream id. Missing ids contain an idle frame.
     pub streams: Vec<PerStreamContent>,
     source: NypaDbSourceState,
     stop: Arc<AtomicBool>,
@@ -126,12 +127,15 @@ impl NYPADBLink {
     fn start_prerecorded(config: &NypaDbPrerecordedSource, stop: Arc<AtomicBool>) -> Self {
         match FlatFileReplay::open(&config.path, config.format, config.skip) {
             Ok(replay) => Self {
-                streams: vec![PerStreamContent {
+                streams: index_streams([PerStreamContent {
                     stream_id: config.stream_id,
                     frame: DataFrame::default(),
                     handle: None,
-                }],
-                source: NypaDbSourceState::Prerecorded(replay),
+                }]),
+                source: NypaDbSourceState::Prerecorded {
+                    replay,
+                    stream_id: config.stream_id,
+                },
                 stop,
                 last_check: Instant::now(),
             },
@@ -155,7 +159,7 @@ impl NYPADBLink {
     pub fn mode(&self) -> NypaDbConnectionMode {
         match self.source {
             NypaDbSourceState::Streaming => NypaDbConnectionMode::Streaming,
-            NypaDbSourceState::Prerecorded(_) => NypaDbConnectionMode::Prerecorded,
+            NypaDbSourceState::Prerecorded { .. } => NypaDbConnectionMode::Prerecorded,
             NypaDbSourceState::Idle => NypaDbConnectionMode::Idle,
         }
     }
@@ -197,7 +201,10 @@ pub struct NypaDbFramesChanged {
 
 enum NypaDbSourceState {
     Streaming,
-    Prerecorded(FlatFileReplay),
+    Prerecorded {
+        replay: FlatFileReplay,
+        stream_id: usize,
+    },
     Idle,
 }
 
@@ -210,7 +217,7 @@ fn connect_socket_streams(stop: Arc<AtomicBool>) -> Vec<PerStreamContent> {
         }
     };
 
-    sockets
+    let connected = sockets
         .into_iter()
         .filter_map(|path| {
             let stream_id = stream_id_from_socket_path(&path)?;
@@ -227,7 +234,31 @@ fn connect_socket_streams(stop: Arc<AtomicBool>) -> Vec<PerStreamContent> {
                 handle: Some(handle),
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    index_streams(connected)
+}
+
+fn index_streams(streams: impl IntoIterator<Item = PerStreamContent>) -> Vec<PerStreamContent> {
+    let mut indexed = Vec::new();
+
+    for stream in streams {
+        let stream_id = stream.stream_id;
+        while indexed.len() <= stream_id {
+            indexed.push(idle_stream(indexed.len()));
+        }
+        indexed[stream_id] = stream;
+    }
+
+    indexed
+}
+
+fn idle_stream(stream_id: usize) -> PerStreamContent {
+    PerStreamContent {
+        stream_id,
+        frame: DataFrame::default(),
+        handle: None,
+    }
 }
 
 fn announce_initial_connection_mode(link: Res<NYPADBLink>, mut commands: Commands) {
@@ -275,8 +306,12 @@ fn check_for_source_change(mut link: ResMut<NYPADBLink>, mut commands: Commands)
                 .iter()
                 .filter_map(|path| stream_id_from_socket_path(path))
                 .collect();
-            let connected_ids: HashSet<_> =
-                link.streams.iter().map(|stream| stream.stream_id).collect();
+            let connected_ids: HashSet<_> = link
+                .streams
+                .iter()
+                .filter(|stream| stream.handle.is_some())
+                .map(|stream| stream.stream_id)
+                .collect();
 
             if discovered_ids == connected_ids {
                 return;
@@ -305,18 +340,18 @@ fn check_for_source_change(mut link: ResMut<NYPADBLink>, mut commands: Commands)
 fn drain_nypa_frames(mut link: ResMut<NYPADBLink>, mut commands: Commands) {
     match link.source {
         NypaDbSourceState::Streaming => drain_socket_frames(&mut link, &mut commands),
-        NypaDbSourceState::Prerecorded(_) => drain_file_frame(&mut link, &mut commands),
+        NypaDbSourceState::Prerecorded { .. } => drain_file_frame(&mut link, &mut commands),
         NypaDbSourceState::Idle => {}
     }
 }
 
 fn drain_socket_frames(link: &mut NYPADBLink, commands: &mut Commands) {
-    link.streams.retain_mut(|stream| {
+    for stream in &mut link.streams {
         let Some(handle) = &mut stream.handle else {
-            return true;
+            continue;
         };
-        let mut keep_stream = true;
-        let changed = handle.drain(|event| match &event.kind {
+        let mut disconnected = false;
+        handle.drain(|event| match &event.kind {
             ReaderEventKind::Frame => {
                 stream.frame.copy_from(&event.payload);
                 commands.trigger(NypaDbFramesChanged {
@@ -327,13 +362,16 @@ fn drain_socket_frames(link: &mut NYPADBLink, commands: &mut Commands) {
             }
             ReaderEventKind::Disconnected { reason } => {
                 eprintln!("NYPA DB stream {} disconnected: {reason}", stream.stream_id);
-                keep_stream = false;
+                disconnected = true;
             }
         });
-        !changed || keep_stream
-    });
+        if disconnected {
+            stream.handle = None;
+            stream.frame = DataFrame::default();
+        }
+    }
 
-    if link.streams.is_empty() {
+    if !link.streams.iter().any(|stream| stream.handle.is_some()) {
         link.replace_with_idle();
         commands.trigger(NypaDbConnectionModeChanged {
             previous: NypaDbConnectionMode::Streaming,
@@ -343,14 +381,14 @@ fn drain_socket_frames(link: &mut NYPADBLink, commands: &mut Commands) {
 }
 
 fn drain_file_frame(link: &mut NYPADBLink, commands: &mut Commands) {
-    let result = match &mut link.source {
-        NypaDbSourceState::Prerecorded(replay) => replay.read_next(),
+    let (result, stream_id) = match &mut link.source {
+        NypaDbSourceState::Prerecorded { replay, stream_id } => (replay.read_next(), *stream_id),
         _ => return,
     };
 
     match result {
         Ok(FlatFileRead::Frame(frame)) => {
-            if let Some(stream) = link.streams.first_mut() {
+            if let Some(stream) = link.streams.get_mut(stream_id) {
                 stream.frame.copy_from(&frame);
                 commands.trigger(NypaDbFramesChanged {
                     stream_id: stream.stream_id,
@@ -413,6 +451,28 @@ mod tests {
     }
 
     #[test]
+    fn sparse_stream_ids_keep_their_vector_indexes() {
+        let streams = index_streams([PerStreamContent {
+            stream_id: 2,
+            frame: DataFrame {
+                stamp_us: 1,
+                source: NypaDbFrameSource::LiveDb,
+                content: vec![4.0],
+            },
+            handle: None,
+        }]);
+
+        assert_eq!(streams.len(), 3);
+        for (index, stream) in streams.iter().enumerate() {
+            assert_eq!(stream.stream_id, index);
+        }
+        assert_eq!(streams[0].frame.source, NypaDbFrameSource::Idle);
+        assert_eq!(streams[1].frame.source, NypaDbFrameSource::Idle);
+        assert_eq!(streams[2].frame.source, NypaDbFrameSource::LiveDb);
+        assert_eq!(streams[2].frame.content, [4.0]);
+    }
+
+    #[test]
     fn prerecorded_frames_use_selected_stream_id() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -440,12 +500,14 @@ mod tests {
             app.update();
 
             let link = app.world().resource::<NYPADBLink>();
-            assert_eq!(link.streams[0].stream_id, 7);
+            assert_eq!(link.streams.len(), 8);
+            assert_eq!(link.streams[0].frame.source, NypaDbFrameSource::Idle);
+            assert_eq!(link.streams[7].stream_id, 7);
             assert_eq!(
-                link.streams[0].frame.source,
+                link.streams[7].frame.source,
                 NypaDbFrameSource::FlatFileFallback
             );
-            assert_eq!(link.streams[0].frame.content, [2.5]);
+            assert_eq!(link.streams[7].frame.content, [2.5]);
             let change = &app.world().resource::<ObservedFrameChanges>().0[0];
             assert_eq!(change.stream_id, 7);
             assert_eq!(change.source, NypaDbFrameSource::FlatFileFallback);
