@@ -28,7 +28,7 @@ pub use faults::{
     FaultVariable, Faulted, NypaDbFaultPlugin, NypaDbFaultTrigger,
 };
 pub use flat_file::FlatFileFormat;
-pub use frame::{DataFrame, NypaDbFrameSource};
+pub use frame::{DataFrame, NypaDbFrameSource, NypaDbFrameStatus};
 pub use plugin::{
     NYPADBLink, NypaDbClientPlugin, NypaDbConnectionMode, NypaDbConnectionModeChanged,
     NypaDbFramesChanged, NypaDbPrerecordedSource, PerStreamContent,

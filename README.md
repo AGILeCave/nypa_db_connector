@@ -48,6 +48,12 @@ distinguish `LiveDb`, `RecordedDb`, `FlatFileFallback`, and `Idle` content. `Idl
 a frame that has not received content yet; connection-level transitions to idle remain observable
 through `NypaDbConnectionModeChanged`.
 
+DB frames and change events also expose `NypaDbFrameStatus`, decoded from timestamp bits 60-62.
+The status distinguishes data from waiting, unaligned, unavailable, stopped, disconnected, and
+internal-error heartbeats. A non-data heartbeat has an `Idle` frame source even when the server
+repeats its last payload for compatibility; use `status`, rather than payload length, to determine
+whether current content is available.
+
 `NYPADBLink::streams` is indexed by stream id: content for stream `n` is always stored at
 `streams[n]`. Gaps between published stream ids are retained as slots containing an `Idle` frame.
 

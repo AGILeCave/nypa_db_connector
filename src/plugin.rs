@@ -11,7 +11,7 @@ use std::{
 use bevy::prelude::*;
 
 use crate::{
-    DataFrame, FlatFileFormat, NypaDbFrameSource,
+    DataFrame, FlatFileFormat, NypaDbFrameSource, NypaDbFrameStatus,
     discovery::{find_publisher_sockets, stream_id_from_socket_path},
     flat_file::{FlatFileRead, FlatFileReplay},
     socket::{ReaderEventKind, ReaderHandle, spawn_reader},
@@ -197,6 +197,8 @@ pub struct NypaDbFramesChanged {
     pub timestamp_us: u64,
     /// Origin of the new frame's content.
     pub source: NypaDbFrameSource,
+    /// Whether the update contains data or reports an availability condition.
+    pub status: NypaDbFrameStatus,
 }
 
 enum NypaDbSourceState {
@@ -358,6 +360,7 @@ fn drain_socket_frames(link: &mut NYPADBLink, commands: &mut Commands) {
                     stream_id: stream.stream_id,
                     timestamp_us: event.payload.stamp_us,
                     source: event.payload.source,
+                    status: event.payload.status,
                 });
             }
             ReaderEventKind::Disconnected { reason } => {
@@ -394,6 +397,7 @@ fn drain_file_frame(link: &mut NYPADBLink, commands: &mut Commands) {
                     stream_id: stream.stream_id,
                     timestamp_us: frame.stamp_us,
                     source: frame.source,
+                    status: frame.status,
                 });
             }
         }
@@ -457,6 +461,7 @@ mod tests {
             frame: DataFrame {
                 stamp_us: 1,
                 source: NypaDbFrameSource::LiveDb,
+                status: NypaDbFrameStatus::Data,
                 content: vec![4.0],
             },
             handle: None,
@@ -511,6 +516,7 @@ mod tests {
             let change = &app.world().resource::<ObservedFrameChanges>().0[0];
             assert_eq!(change.stream_id, 7);
             assert_eq!(change.source, NypaDbFrameSource::FlatFileFallback);
+            assert_eq!(change.status, NypaDbFrameStatus::Data);
         }
 
         fs::remove_file(path).unwrap();
