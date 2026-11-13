@@ -94,7 +94,8 @@ fn change_gain(control: Res<NypaDbControl>) {
 }
 
 fn clear_one_fault(control: Res<NypaDbControl>) {
-    // Writes only this variable to zero; other variables in stream 0 are unchanged.
+    // Writes only this variable to zero and marks the request as a reset, so it cannot
+    // automatically trigger another ROI. Other variables in stream 0 are unchanged.
     let _ = control.reset_variable(0, "breaker_fault");
 }
 

@@ -599,6 +599,7 @@ fn operation_rpc(operation: &NypaDbControlOperation) -> (&'static str, Value) {
                 "stream_id": stream_id,
                 "name": name,
                 "value": 0.0,
+                "reset": true,
             }),
         ),
         NypaDbControlOperation::ResetVariables { stream_id } => {
@@ -825,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_variable_uses_targeted_zero_value_rpc_shape() {
+    fn reset_variable_marks_targeted_zero_value_as_reset() {
         let (method, params) = operation_rpc(&NypaDbControlOperation::ResetVariable {
             stream_id: 2,
             name: "breaker_fault".to_string(),
@@ -838,6 +839,7 @@ mod tests {
                 "stream_id": 2,
                 "name": "breaker_fault",
                 "value": 0.0,
+                "reset": true,
             })
         );
     }
