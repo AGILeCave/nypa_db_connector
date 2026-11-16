@@ -99,6 +99,11 @@ fn clear_one_fault(control: Res<NypaDbControl>) {
     let _ = control.reset_variable(0, "breaker_fault");
 }
 
+fn reset_stream(control: Res<NypaDbControl>) {
+    // Restores every variable in stream 0 to its configured initial value.
+    let _ = control.reset_variables(0);
+}
+
 fn change_operating_state(control: Res<NypaDbControl>) {
     // Tuples are accepted for concise, inline batches.
     let _ = control.set_variables(
@@ -130,6 +135,11 @@ fn draw_variables(variables: Res<NypaDbVariables>) {
 }
 ```
 
+Use `set_variable` when zero is an ordinary operating value. Use `reset_variable` when zero means
+"clear/reset" so the request is marked as a reset and does not automatically start another ROI.
+`reset_variable` changes only the named variable; `reset_variables` restores every variable in the
+stream to its configured initial value, which is not necessarily zero.
+
 Fault behavior and variable activation are available through `NypaDbFaultPlugin`. Add `FaultArea`
 to world entities that can be faulted, add one `FaultSpawnSource` where fault throws should start,
 then trigger a throw at a target fault area. A successful request adds `FaultRequested`; `Faulted`
@@ -137,8 +147,6 @@ is added and removed only to reflect the DB's reported value. Faults remain acti
 you add `FaultClearRequested` to reset that fault's variable to zero without resetting any other
 variable in its stream. Configure an automatic clear explicitly with
 `FaultArea::with_auto_reset_after`.
-
-Upgrading from commit `3abdaae`? See the [fault migration guide](FAULTS_MIGRATION.md).
 
 The moving throw entity has a public `FaultThrow` component; observe that component being added to
 attach your own model, lights, particles, or audio. Content attached as a child follows the
